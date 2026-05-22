@@ -1,0 +1,61 @@
+# Stage 2: freeze the scale & shift heads (already trained in stage 1),
+# feed GT scale/shift into the depth map, and train the rest of gaussian_head.
+
+Hook:
+  - type: ckpthook
+    by_epoch: true
+    interval: 1
+
+Model:
+  Name: Pi3
+  Gaussian_head:
+    Name: GuassianHead
+    Loss_weight:
+      rec_loss: 5.0
+      perceptual_loss: 0.05
+    sky_mask: 400.0
+    offset_scale: 2.0
+    max_scale: 0.1
+    max_scale_voxel: 0.2
+    l1_loss_mask: [1.875, 1.875, 1.875, 1.875, 1.875, 1.875, 1.875, 1.875, 1.875, 1.875]
+    p_loss_mask: [0.6250, 0.6250, 0.6250, 0.6250, 0.6250, 0.6250, 0.6250, 0.6250, 0.6250, 0.6250]
+    pts_range: [-72.0, -72.0, -4.0, 72.0, 72.0, 12.0]
+    voxel_size: [0.1, 0.1, 0.2]
+    resolution: [518, 350]
+    voxel_stream_quantile: 0.6
+    voxel_stream_quantile_outview: 0.6
+    voxel_stream_opacity_thre: -1
+    voxel_stream_inview_num: 300000
+    voxel_stream_outview_num: 400000
+    sky_gaussian_scale: 1.0
+    sky_gaussian_offset: 2.0
+    voxel_gs_num: 2
+    neg_dyn_num: 50000
+    neg_dyn_ratio: 5
+    dyn_loss_weight: 0.05
+    aux_voxel_weight: 0.25
+  # initialize from stage-1 checkpoint
+  # pretrained: ./work_dirs/waymo_stage1/model_epoch_20/model.safetensors
+
+Train:
+  epoch: 15
+  batch_size: 2
+  stage: 2
+
+Optimizer:
+  backbone_cfg:
+    type: get_parameter_groups_v3
+    lr_cfg:
+      weight_decay: 0.01
+      key_configs:
+        gaussian_head.image_backbone: 1.5e-5
+        gaussian_head: 1.5e-4
+
+Scheduler:
+  name: OneCycleLR
+
+Dataset:
+  name: WaymoDataset
+  future_num: 1
+  frame_num: 5
+  resolution: [518, 350]

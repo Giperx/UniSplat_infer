@@ -1,0 +1,52 @@
+# Stage 1: train scale & shift heads only, supervised by depth alignment.
+# All other gaussian_head modules and the Pi3 backbone are frozen.
+
+Hook:
+  - type: ckpthook
+    by_epoch: true
+    interval: 1
+
+Model:
+  Name: Pi3
+  Gaussian_head:
+    Name: GuassianHead
+    sky_mask: 400.0
+    offset_scale: 2.0
+    max_scale: 0.1
+    max_scale_voxel: 0.2
+    pts_range: [-72.0, -72.0, -4.0, 72.0, 72.0, 12.0]
+    voxel_size: [0.1, 0.1, 0.2]
+    resolution: [518, 350]
+    voxel_stream_quantile: 0.6
+    voxel_stream_quantile_outview: 0.6
+    voxel_stream_opacity_thre: -1
+    voxel_stream_inview_num: 300000
+    voxel_stream_outview_num: 400000
+    sky_gaussian_scale: 1.0
+    sky_gaussian_offset: 2.0
+    voxel_gs_num: 2
+    # scale & shift loss weights
+    scale_loss_weight: 0.1
+    shift_loss_weight: 1.0
+
+Train:
+  epoch: 20
+  batch_size: 2
+  stage: 1
+
+Optimizer:
+  backbone_cfg:
+    type: get_parameter_groups_v3
+    lr_cfg:
+      weight_decay: 0.01
+      key_configs:
+        gaussian_head: 1.0e-4
+
+Scheduler:
+  name: OneCycleLR
+
+Dataset:
+  name: WaymoDataset
+  future_num: 1
+  frame_num: 5
+  resolution: [518, 350]
