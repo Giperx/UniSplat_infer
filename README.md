@@ -21,7 +21,13 @@ First, clone this repository and install the dependencies.
 ```bash
 git clone git@github.com:chenshi3/UniSplat.git
 cd UniSplat
-pip install -r requirements.txt
+
+# belong to cuda-12.4
+conda create -n unisplat python=3.10 -y
+conda activate unisplat
+pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124 -i https://pypi.tuna.tsinghua.edu.cn/simple
+pip install torch_scatter==2.1.2 torch_cluster==1.6.3 -f https://data.pyg.org/whl/torch-2.6.0+cu124.html
+pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 ## install 3DGS rasterizer
 pip install -e submodules/diff-gaussian-rasterization-feature
