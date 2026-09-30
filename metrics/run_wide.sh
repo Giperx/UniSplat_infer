@@ -2,9 +2,9 @@
 # UniSplat wide inference, then DWSplat-style metrics, for one dataset.
 #
 #   conda activate unisplat
-#   bash metrics/run_wide.sh ddad
-#   bash metrics/run_wide.sh nuscenes --skip-infer
-#   bash metrics/run_lyft1920.sh --single-only --max-frames 1
+#   bash metrics/run_wide.sh ddad single
+#   bash metrics/run_wide.sh nuscenes multiframes --skip-infer
+#   bash metrics/run_lyft1920.sh single --max-frames 1
 #
 # Single-frame renders: outputs/<dataset>_wide/<scene>/rgb/{frame}_5_wide.jpg
 # Multi-frame renders:  outputs/<dataset>_wide_multiframes/<scene>/rgb/{newest}_5_wide.jpg
@@ -23,16 +23,18 @@ cd "$ROOT"
 usage() {
   cat <<'EOF'
 Usage:
-  bash metrics/run_wide.sh DATASET [options] [inference flags...]
+  bash metrics/run_wide.sh DATASET MODE [options] [inference flags...]
 
 DATASET:
   nuscenes | ddad | lyft1920 | lyft1224 | widedrive
 
+MODE (required; only one runs):
+  single         one frame per forward, outputs/<dataset>_wide
+  multiframes    3-frame history window, outputs/<dataset>_wide_multiframes
+
 Options:
   --load-from PATH     default: pretrained/model.safetensors
   --skip-infer         score existing renders only
-  --single-only        single-frame inference and metrics
-  --multi-only         3-frame history inference and metrics
   --gt-root PATH       override the ground-truth directory
   --val-list PATH      override the scene list
 
@@ -86,10 +88,25 @@ case "$DATASET" in
     ;;
 esac
 
+if [[ $# -lt 1 || "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  echo "missing mode: single or multiframes" >&2
+  usage >&2
+  exit 1
+fi
+
+MODE="$1"
+shift
+case "$MODE" in
+  single|multiframes) ;;
+  *)
+    echo "mode must be single or multiframes, got: $MODE" >&2
+    usage >&2
+    exit 1
+    ;;
+esac
+
 LOAD_FROM="pretrained/model.safetensors"
 SKIP_INFER=0
-SINGLE=1
-MULTI=1
 GT_ROOT=""
 VAL_LIST=""
 INFER_ARGS=()
@@ -112,13 +129,9 @@ while [[ $# -gt 0 ]]; do
       SKIP_INFER=1
       shift
       ;;
-    --single-only)
-      MULTI=0
-      shift
-      ;;
-    --multi-only)
-      SINGLE=0
-      shift
+    --single-only|--multi-only)
+      echo "pass mode as a positional argument: single or multiframes" >&2
+      exit 1
       ;;
     --gt-root)
       GT_ROOT="$(take_value "$1" "${2:-}")"
@@ -147,10 +160,6 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ "$SINGLE" -eq 0 && "$MULTI" -eq 0 ]]; then
-  echo "pass only one of --single-only or --multi-only" >&2
-  exit 1
-fi
 if [[ -z "$GT_ROOT" ]]; then
   GT_ROOT="$(default_gt "$DATASET")"
 fi
@@ -210,16 +219,16 @@ run_metrics() {
     "${val_args[@]}"
 }
 
-if [[ "$SINGLE" -eq 1 ]]; then
-  if [[ "$SKIP_INFER" -eq 0 ]]; then
-    run_infer "scripts/inference_${DATASET}_wide.py"
-  fi
-  run_metrics "outputs/${DATASET}_wide"
+if [[ "$MODE" == "single" ]]; then
+  INFER_SCRIPT="scripts/inference_${DATASET}_wide.py"
+  RENDER_ROOT="outputs/${DATASET}_wide"
+else
+  INFER_SCRIPT="scripts/inference_${DATASET}_wide_multiframes.py"
+  RENDER_ROOT="outputs/${DATASET}_wide_multiframes"
 fi
 
-if [[ "$MULTI" -eq 1 ]]; then
-  if [[ "$SKIP_INFER" -eq 0 ]]; then
-    run_infer "scripts/inference_${DATASET}_wide_multiframes.py"
-  fi
-  run_metrics "outputs/${DATASET}_wide_multiframes"
+echo "Mode: $MODE -> $RENDER_ROOT"
+if [[ "$SKIP_INFER" -eq 0 ]]; then
+  run_infer "$INFER_SCRIPT"
 fi
+run_metrics "$RENDER_ROOT"
