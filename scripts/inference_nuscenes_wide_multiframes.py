@@ -31,29 +31,27 @@ if str(REPO_ROOT) not in sys.path:
 from dataset import nuscenes_wide as nw  # noqa: E402
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="Multi-frame nuScenes wide-FOV inference (UniSplat).")
+def parse_args(argv=None, default_dataset="nuscenes"):
+    parser = argparse.ArgumentParser(description="Multi-frame wide-FOV inference (UniSplat).")
+    parser.add_argument("--dataset", type=str, default=default_dataset, choices=sorted(nw.DATASETS))
     parser.add_argument("--config", type=str, default="configs/waymo.yaml")
     parser.add_argument("--load-from", dest="load_from", type=str, default="pretrained/model.safetensors")
-    parser.add_argument("--data-root", dest="data_root", type=str, default="data/nuscenes/processed_10Hz/trainval2")
+    parser.add_argument("--data-root", dest="data_root", type=str, default=None)
     parser.add_argument("--scene-list", dest="scene_list", type=str, default=None)
     parser.add_argument("--scene", type=str, default=None)
     parser.add_argument("--frame", type=str, default=None, help="Render the window whose newest frame is this id.")
     parser.add_argument("--max-frames", dest="max_frames", type=int, default=-1)
     parser.add_argument("--num-frames", dest="num_frames", type=int, default=3)
-    parser.add_argument("--cameras", type=str, default="5,4,3")
-    parser.add_argument("--render-camera", dest="render_camera", type=int, default=5)
+    parser.add_argument("--cameras", type=str, default=None)
+    parser.add_argument("--render-camera", dest="render_camera", type=int, default=None)
     parser.add_argument("--width-factor", dest="width_factor", type=float, default=3.0)
-    parser.add_argument(
-        "--car-mask-root", dest="car_mask_root", type=str,
-        default="data/nuscenes/processed_10Hz/nuscenes_mask",
-    )
+    parser.add_argument("--car-mask-root", dest="car_mask_root", type=str, default=None)
     parser.add_argument("--mask-render-view", dest="mask_render_view", action="store_true")
     parser.add_argument("--disable-car-mask", dest="disable_car_mask", action="store_true")
-    parser.add_argument("--output-dir", dest="output_dir", type=str, default="outputs/nuscenes_wide_multiframes")
+    parser.add_argument("--output-dir", dest="output_dir", type=str, default=None)
     parser.add_argument("--save-inputs", dest="save_inputs", action="store_true")
     parser.add_argument("--device", type=str, default="cuda")
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def resolve_local(path) -> Path:
@@ -151,8 +149,8 @@ def prepare_frame(sdir, frame, cameras, out_wh, src_wh):
     }
 
 
-def main():
-    args = parse_args()
+def main(argv=None, default_dataset="nuscenes"):
+    args = nw.fill_preset_args(parse_args(argv, default_dataset=default_dataset), multi=True)
     if args.num_frames < 1:
         raise SystemExit("--num-frames must be >= 1.")
 
@@ -162,7 +160,7 @@ def main():
 
     _preload_torch_libs(torch)
     data_root = resolve_local(args.data_root)
-    scene_list = resolve_local(args.scene_list) if args.scene_list else (data_root / "nuScenes_Val2.txt")
+    scene_list = resolve_local(args.scene_list)
     mask_root = resolve_local(args.car_mask_root)
     output_dir = resolve_local(args.output_dir)
 
@@ -232,7 +230,10 @@ def main():
                 if args.disable_car_mask:
                     keep_np = np.ones((S, out_h, out_w), dtype=bool)
                 else:
-                    camera_masks = nw.load_camera_keep_masks(mask_root, cameras, out_wh)
+                    camera_masks = nw.load_camera_keep_masks(
+                        mask_root, cameras, out_wh,
+                        mask_kind=args.mask_kind, scene=scene, mask_ext=args.mask_ext,
+                    )
                     keep_np = nw.build_car_keep_mask(
                         camera_masks, cameras, out_wh, render_camera,
                         mask_render_view=mask_cam5, disable_car_mask=False,
@@ -311,7 +312,7 @@ def main():
                 f"dropped_current={current_dropped} dropped_history={history_dropped}",
                 flush=True,
             )
-            if not args.disable_car_mask and history_dropped == 0:
+            if args.mask_kind != "none" and not args.disable_car_mask and history_dropped == 0:
                 print(
                     f"[warn] scene={scene} window={','.join(window)}: history ego masks zeroed 0 pixel-gaussians.",
                     file=sys.stderr,

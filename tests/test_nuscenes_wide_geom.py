@@ -12,6 +12,7 @@ triggers ``dataset/__init__.py`` (which imports torch).
 from __future__ import annotations
 
 import importlib.util
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -21,6 +22,7 @@ MODULE_PATH = REPO_ROOT / "dataset" / "nuscenes_wide.py"
 
 _spec = importlib.util.spec_from_file_location("nuscenes_wide", MODULE_PATH)
 geom = importlib.util.module_from_spec(_spec)
+sys.modules[_spec.name] = geom
 _spec.loader.exec_module(geom)
 
 try:  # pragma: no cover - depends on the environment
@@ -135,6 +137,56 @@ def test_history_masks_render_camera():
     assert newest[0].all()
     assert not newest[1].any()
     assert newest[2].all()
+
+
+def test_dataset_mask_paths():
+    assert geom.camera_mask_path("/masks", 5).name == "CAM_BACK_mask.png"
+    lyft = geom.camera_mask_path("/ego_car_masks", 5, mask_kind="lyft", mask_ext="jpg")
+    assert lyft.as_posix().endswith("/ego_car_masks/5.jpg")
+    ddad = geom.camera_mask_path("/valid", 3, mask_kind="ddad", scene="000", mask_ext="jpg")
+    assert ddad.as_posix().endswith("/valid/000/ego_car_masks/3.jpg")
+    try:
+        geom.camera_mask_path("/x", 5, mask_kind="none")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("WideDrive must not resolve an ego-car mask path")
+
+
+def test_fill_preset_widedrive_disables_mask():
+    class Args:
+        pass
+
+    args = Args()
+    args.dataset = "widedrive"
+    args.data_root = None
+    args.scene_list = None
+    args.cameras = None
+    args.render_camera = None
+    args.car_mask_root = None
+    args.output_dir = None
+    args.disable_car_mask = False
+
+    geom.fill_preset_args(args, multi=False)
+    assert args.data_root.endswith("WideDriveVal")
+    assert args.scene_list.endswith("val.txt")
+    assert args.cameras == "5,4,3"
+    assert args.render_camera == 5
+    assert args.disable_car_mask is True
+    assert args.mask_kind == "none"
+    assert args.output_dir == "outputs/widedrive_wide"
+
+
+def test_real_dataset_masks_if_present():
+    ddad = REPO_ROOT / "data" / "ddad" / "valid" / "000" / "ego_car_masks" / "5.jpg"
+    lyft = REPO_ROOT / "data" / "lyft" / "lyft_val1920_3cams" / "ego_car_masks" / "5.jpg"
+    wide = REPO_ROOT / "data" / "WideDrive_processed" / "WideDriveVal" / "val.txt"
+    if not ddad.is_file() or not lyft.is_file() or not wide.is_file():
+        _skip("ddad/lyft/widedrive sample data not mounted")
+    assert geom.camera_mask_path(ddad.parents[2], 5, mask_kind="ddad", scene="000", mask_ext="jpg") == ddad
+    assert geom.camera_mask_path(lyft.parent, 5, mask_kind="lyft", mask_ext="jpg") == lyft
+    scenes = geom.read_scene_list(wide)
+    assert scenes and scenes[0].startswith("Town")
 
 
 def test_real_nuscenes_files_if_present():

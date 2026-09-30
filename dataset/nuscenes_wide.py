@@ -18,6 +18,7 @@ See ``scripts/inference_nuscenes_wide.py`` for the driver.
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -38,6 +39,104 @@ CAR_MASK_KEEP_THRESHOLD = 128
 DEFAULT_TRAIN_LONG = 518
 DEFAULT_PATCH = 14
 DEFAULT_WIDTH_FACTOR = 3.0
+
+
+@dataclass(frozen=True)
+class DatasetPreset:
+    """Where one driving dataset keeps scenes, cameras, and ego-car masks.
+
+    Poses are the same for every preset: single-frame uses ``cam2ego`` as
+    OpenCV cam2world, and multi-frame uses that rig in the ego frame with
+    ``ego_pose`` as ego-to-world. Only the mask layout differs.
+    """
+
+    name: str
+    data_root: str
+    scene_list_name: str
+    cameras: str = "5,4,3"
+    render_camera: int = 5
+    mask_kind: str = "nuscenes"  # nuscenes | lyft | ddad | none
+    mask_root: str = ""
+    mask_ext: str = "png"
+
+
+DATASETS: Dict[str, DatasetPreset] = {
+    "nuscenes": DatasetPreset(
+        name="nuscenes",
+        data_root="data/nuscenes/processed_10Hz/trainval2",
+        scene_list_name="nuScenes_Val2.txt",
+        mask_kind="nuscenes",
+        mask_root="data/nuscenes/processed_10Hz/nuscenes_mask",
+        mask_ext="png",
+    ),
+    "ddad": DatasetPreset(
+        name="ddad",
+        data_root="data/ddad/valid",
+        scene_list_name="valid.txt",
+        mask_kind="ddad",
+        mask_root="data/ddad/valid",
+        mask_ext="jpg",
+    ),
+    "lyft1920": DatasetPreset(
+        name="lyft1920",
+        data_root="data/lyft/lyft_val1920_3cams",
+        scene_list_name="lyft_val1920.txt",
+        mask_kind="lyft",
+        mask_root="data/lyft/lyft_val1920_3cams/ego_car_masks",
+        mask_ext="jpg",
+    ),
+    "lyft1224": DatasetPreset(
+        name="lyft1224",
+        data_root="data/lyft/lyft_val1224_3cams",
+        scene_list_name="lyft_val1224.txt",
+        mask_kind="lyft",
+        mask_root="data/lyft/lyft_val1224_3cams/ego_car_masks",
+        mask_ext="jpg",
+    ),
+    "widedrive": DatasetPreset(
+        name="widedrive",
+        data_root="data/WideDrive_processed/WideDriveVal",
+        scene_list_name="val.txt",
+        mask_kind="none",
+        mask_root="",
+        mask_ext="",
+    ),
+}
+
+
+def get_preset(name: str) -> DatasetPreset:
+    key = str(name).strip().lower()
+    if key not in DATASETS:
+        raise KeyError(f"Unknown dataset {name!r}; known are {sorted(DATASETS)}.")
+    return DATASETS[key]
+
+
+def fill_preset_args(args, multi: bool = False):
+    """Fill unset paths from ``args.dataset``. WideDrive forces masks off."""
+    preset = get_preset(args.dataset)
+    if not getattr(args, "data_root", None):
+        args.data_root = preset.data_root
+    if not getattr(args, "scene_list", None):
+        args.scene_list = str(Path(args.data_root) / preset.scene_list_name)
+    if not getattr(args, "cameras", None):
+        args.cameras = preset.cameras
+    if getattr(args, "render_camera", None) is None:
+        args.render_camera = preset.render_camera
+    if not getattr(args, "car_mask_root", None):
+        if preset.mask_kind == "lyft":
+            args.car_mask_root = str(Path(args.data_root) / "ego_car_masks")
+        elif preset.mask_kind == "ddad":
+            args.car_mask_root = args.data_root
+        else:
+            args.car_mask_root = preset.mask_root
+    if not getattr(args, "output_dir", None):
+        suffix = "_wide_multiframes" if multi else "_wide"
+        args.output_dir = f"outputs/{preset.name}{suffix}"
+    args.mask_kind = preset.mask_kind
+    args.mask_ext = preset.mask_ext or "png"
+    if preset.mask_kind == "none":
+        args.disable_car_mask = True
+    return args
 
 
 # ---------------------------------------------------------------------------
@@ -378,25 +477,56 @@ def load_keep_mask_resized(path, out_wh: Sequence[int]) -> np.ndarray:
     return array >= CAR_MASK_KEEP_THRESHOLD
 
 
-def camera_mask_path(mask_root, cam: int) -> Path:
-    """Path of ``cam``'s nuScenes ego-car mask under ``mask_root``."""
+def camera_mask_path(
+    mask_root,
+    cam: int,
+    mask_kind: str = "nuscenes",
+    scene=None,
+    mask_ext: str = "png",
+) -> Path:
+    """Resolve one camera's ego-car mask.
+
+    * ``nuscenes``: ``<mask_root>/CAM_*_mask.png`` (dataset-level).
+    * ``lyft``: ``<mask_root>/{cam}.jpg`` (split-level ``ego_car_masks``).
+    * ``ddad``: ``<mask_root>/<scene>/ego_car_masks/{cam}.jpg`` (per scene).
+    * ``none``: WideDrive has no ego-car mask; callers must keep every pixel.
+    """
     cam = int(cam)
-    if cam not in CAMERA_MASK_FILES:
-        raise KeyError(
-            f"No nuScenes ego-car mask defined for camera {cam}; known are "
-            f"{sorted(CAMERA_MASK_FILES)}."
-        )
-    return Path(mask_root) / CAMERA_MASK_FILES[cam]
+    kind = str(mask_kind)
+    root = Path(mask_root)
+    if kind == "nuscenes":
+        if cam not in CAMERA_MASK_FILES:
+            raise KeyError(
+                f"No nuScenes ego-car mask defined for camera {cam}; known are "
+                f"{sorted(CAMERA_MASK_FILES)}."
+            )
+        return root / CAMERA_MASK_FILES[cam]
+    if kind == "lyft":
+        return root / f"{cam}.{mask_ext}"
+    if kind == "ddad":
+        if scene is None:
+            raise ValueError("DDAD ego-car masks are per-scene; pass scene.")
+        return root / str(scene) / "ego_car_masks" / f"{cam}.{mask_ext}"
+    if kind == "none":
+        raise ValueError("This dataset has no ego-car mask; keep every pixel.")
+    raise KeyError(f"Unknown mask kind {mask_kind!r}.")
 
 
 def load_camera_keep_masks(
-    mask_root, cameras: Sequence[int], out_wh: Sequence[int]
+    mask_root,
+    cameras: Sequence[int],
+    out_wh: Sequence[int],
+    mask_kind: str = "nuscenes",
+    scene=None,
+    mask_ext: str = "png",
 ) -> Dict[int, np.ndarray]:
     """Load every selected camera's keep mask, failing loudly when missing."""
     masks: Dict[int, np.ndarray] = {}
     for cam in cameras:
         cam = int(cam)
-        path = camera_mask_path(mask_root, cam)
+        path = camera_mask_path(
+            mask_root, cam, mask_kind=mask_kind, scene=scene, mask_ext=mask_ext
+        )
         masks[cam] = load_keep_mask_resized(path, out_wh)
     return masks
 

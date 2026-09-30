@@ -34,31 +34,26 @@ if str(REPO_ROOT) not in sys.path:
 from dataset import nuscenes_wide as nw  # noqa: E402
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="Single-frame nuScenes wide-FOV inference (UniSplat).")
+def parse_args(argv=None, default_dataset="nuscenes"):
+    parser = argparse.ArgumentParser(description="Single-frame wide-FOV inference (UniSplat).")
+    parser.add_argument("--dataset", type=str, default=default_dataset, choices=sorted(nw.DATASETS))
     parser.add_argument("--config", type=str, default="configs/waymo.yaml")
     parser.add_argument("--load-from", dest="load_from", type=str, default="pretrained/model.safetensors")
-    parser.add_argument("--data-root", dest="data_root", type=str, default="data/nuscenes/processed_10Hz/trainval2")
-    parser.add_argument(
-        "--scene-list", dest="scene_list", type=str, default=None,
-        help="Scene id list (one per line). Default: <data-root>/nuScenes_Val2.txt.",
-    )
+    parser.add_argument("--data-root", dest="data_root", type=str, default=None)
+    parser.add_argument("--scene-list", dest="scene_list", type=str, default=None)
     parser.add_argument("--scene", type=str, default=None, help="Process a single scene id instead of the list.")
     parser.add_argument("--frame", type=str, default=None, help="Process a single zero-padded frame id.")
     parser.add_argument("--max-frames", dest="max_frames", type=int, default=-1, help="Max valid frames per scene; -1 = all.")
-    parser.add_argument("--cameras", type=str, default="5,4,3", help="Comma separated context camera ids (order preserved).")
-    parser.add_argument("--render-camera", dest="render_camera", type=int, default=5)
+    parser.add_argument("--cameras", type=str, default=None, help="Comma separated context camera ids (order preserved).")
+    parser.add_argument("--render-camera", dest="render_camera", type=int, default=None)
     parser.add_argument("--width-factor", dest="width_factor", type=float, default=3.0)
-    parser.add_argument(
-        "--car-mask-root", dest="car_mask_root", type=str,
-        default="data/nuscenes/processed_10Hz/nuscenes_mask",
-    )
+    parser.add_argument("--car-mask-root", dest="car_mask_root", type=str, default=None)
     parser.add_argument("--mask-render-view", dest="mask_render_view", action="store_true")
     parser.add_argument("--disable-car-mask", dest="disable_car_mask", action="store_true")
-    parser.add_argument("--output-dir", dest="output_dir", type=str, default="outputs/nuscenes_wide")
+    parser.add_argument("--output-dir", dest="output_dir", type=str, default=None)
     parser.add_argument("--save-inputs", dest="save_inputs", action="store_true")
     parser.add_argument("--device", type=str, default="cuda")
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def _preload_torch_libs(torch) -> None:
@@ -94,8 +89,8 @@ def save_rgb(tensor_chw, path: Path) -> None:
     Image.fromarray(array).save(path, quality=95)
 
 
-def main():
-    args = parse_args()
+def main(argv=None, default_dataset="nuscenes"):
+    args = nw.fill_preset_args(parse_args(argv, default_dataset=default_dataset), multi=False)
 
     from omegaconf import OmegaConf
     import torch
@@ -111,7 +106,7 @@ def main():
 
     cfg = OmegaConf.load(resolve_local(args.config))
     data_root = resolve_local(args.data_root)
-    scene_list = resolve_local(args.scene_list) if args.scene_list else (data_root / "nuScenes_Val2.txt")
+    scene_list = resolve_local(args.scene_list)
     mask_root = resolve_local(args.car_mask_root)
     output_dir = resolve_local(args.output_dir)
     load_from = resolve_local(args.load_from)
@@ -225,7 +220,10 @@ def main():
                 masked_cameras = [
                     cam for cam in cameras if cam != render_camera or args.mask_render_view
                 ]
-                camera_masks = nw.load_camera_keep_masks(mask_root, masked_cameras, out_wh)
+                camera_masks = nw.load_camera_keep_masks(
+                    mask_root, masked_cameras, out_wh,
+                    mask_kind=args.mask_kind, scene=scene, mask_ext=args.mask_ext,
+                )
                 keep_np = nw.build_car_keep_mask(
                     camera_masks, cameras, out_wh, render_camera,
                     mask_render_view=args.mask_render_view, disable_car_mask=False,
@@ -291,7 +289,7 @@ def main():
                 f"wide={wide_h}x{wide_w} dropped={dropped}",
                 flush=True,
             )
-            if not args.disable_car_mask and dropped == 0:
+            if args.mask_kind != "none" and not args.disable_car_mask and dropped == 0:
                 print(
                     f"[warn] scene={scene} frame={frame}: ego-car mask zeroed 0 pixel-gaussians.",
                     file=sys.stderr,
