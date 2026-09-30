@@ -14,6 +14,7 @@
 # nuScenes sparse GT is expected at data/nuscenes/sparseMultiplaneImages3_1554x294
 # and is not in this checkout; photometric/HM are skipped until that directory exists.
 # The first photometric run may download LPIPS AlexNet weights.
+# After metrics finish, per-scene matched_img/ and match/ temps are removed.
 
 set -euo pipefail
 
@@ -227,7 +228,34 @@ else
   RENDER_ROOT="outputs/${DATASET}_wide_multiframes"
 fi
 
+cleanup_match_dirs() {
+  local root="$1"
+  local scene_dir name target removed=0
+  [[ -d "$root" ]] || return 0
+  for scene_dir in "$root"/*/; do
+    [[ -d "$scene_dir" ]] || continue
+    for name in matched_img match; do
+      target="${scene_dir}${name}"
+      if [[ -d "$target" ]]; then
+        rm -rf "$target"
+        echo "Removed temp $target"
+        removed=$((removed + 1))
+      fi
+    done
+  done
+  if [[ "$removed" -eq 0 ]]; then
+    echo "No per-scene match temp under $root"
+  fi
+}
+
 echo "Mode: $MODE -> $RENDER_ROOT"
+cleanup_on_exit() {
+  if [[ -n "${RENDER_ROOT:-}" ]]; then
+    cleanup_match_dirs "$RENDER_ROOT"
+  fi
+}
+trap cleanup_on_exit EXIT
+
 if [[ "$SKIP_INFER" -eq 0 ]]; then
   run_infer "$INFER_SCRIPT"
 fi
