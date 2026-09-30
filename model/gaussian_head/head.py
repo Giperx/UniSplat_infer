@@ -328,7 +328,7 @@ class GuassianHead(nn.Module):
                 
                 tmp_history_poses = history_poses_homo[tmp_mask]
                 tmp_history_features = history_features[i][tmp_mask]
-                new_mask, _ = is_point_in_frustum_batch(tmp_history_poses, intrinsics[i], camera2lidar[i,:, :3,:3], camera2lidar[i,:, :3,3], 0.5, 72, 518, 350) 
+                new_mask, _ = is_point_in_frustum_batch(tmp_history_poses, intrinsics[i], camera2lidar[i,:, :3,:3], camera2lidar[i,:, :3,3], 0.5, 72, W, H)
                 new_mask = new_mask.any(dim=-1)
                 # in view filter
                 inview_opacities = voxel_opacities[i][tmp_mask][new_mask]
@@ -430,7 +430,15 @@ class GuassianHead(nn.Module):
                 semantics=gaussians_all_dynscore,
             )
             test_out = tmp
-            pred_dynamics_region = (tmp['dyn'][5:] > 0.5)[:,0,:,:]
+            # Waymo renders novel views first and the S input cameras last, so
+            # dyn[5:] matched S=5. Use the last S maps whenever they exist so a
+            # 3-camera sequence still lines up with intrinsics/camera2lidar.
+            # Fewer than S views (wide-only) cannot be projected that way.
+            n_dyn = tmp['dyn'].shape[0]
+            if n_dyn >= S:
+                pred_dynamics_region = (tmp['dyn'][-S:] > 0.5)[:,0,:,:]
+            else:
+                pred_dynamics_region = tmp['dyn'].new_zeros((0, H, W), dtype=tmp['dyn'].dtype)
             dyn_gs_mask = self.get_dynamic_gs_mask(pred_dynamics_region, gaussians_all[:,:3].detach(), intrinsics[i], camera2lidar[i])
             # just save static gaussians
             save_gaussians.append(gaussians_all.detach()[(dyn_gs_mask==False)])

@@ -399,3 +399,48 @@ def load_camera_keep_masks(
         path = camera_mask_path(mask_root, cam)
         masks[cam] = load_keep_mask_resized(path, out_wh)
     return masks
+
+
+def enumerate_windows(frames: Sequence[str], num_frames: int) -> List[Tuple[str, ...]]:
+    """Causal windows of ``num_frames`` consecutive listed frames, oldest first.
+
+    The last element is the frame that should be rendered. Fewer than
+    ``num_frames`` valid frames yields no partial window.
+    """
+    num_frames = int(num_frames)
+    if num_frames < 1:
+        raise ValueError(f"num_frames must be >= 1, got {num_frames}.")
+    frames = list(frames)
+    if len(frames) < num_frames:
+        return []
+    return [
+        tuple(frames[start : start + num_frames])
+        for start in range(len(frames) - num_frames + 1)
+    ]
+
+
+def select_windows(
+    frames: Sequence[str], num_frames: int, frame=None
+) -> List[Tuple[str, ...]]:
+    """Windows whose newest frame matches ``frame``, or every window if unset."""
+    windows = enumerate_windows(frames, num_frames)
+    if frame is None:
+        return windows
+    wanted = normalize_frame_id(frame, frames)
+    return [window for window in windows if window[-1] == wanted]
+
+
+def frames_are_consecutive(window: Sequence[str]) -> bool:
+    """True when integer frame ids increase by 1, which the history queue requires."""
+    ids = [int(frame) for frame in window]
+    return all(newer == older + 1 for older, newer in zip(ids, ids[1:]))
+
+
+def mask_render_camera(is_newest: bool, mask_render_view: bool = False) -> bool:
+    """History frames always mask the render camera; the newest frame does not.
+
+    ``mask_render_view`` forces the newest render camera to be masked too.
+    """
+    if not is_newest:
+        return True
+    return bool(mask_render_view)

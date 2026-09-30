@@ -104,6 +104,39 @@ def test_nonsky_drop_mask_sky_removed_shifts_indices():
     assert bool(sky_drop[0]) is True
 
 
+def test_enumerate_windows_causal():
+    frames = ["000", "001", "002", "003"]
+    windows = geom.enumerate_windows(frames, 3)
+    assert windows == [("000", "001", "002"), ("001", "002", "003")]
+    assert geom.select_windows(frames, 3, frame="2") == [("000", "001", "002")]
+    assert geom.enumerate_windows(["000", "001"], 3) == []
+    assert geom.frames_are_consecutive(("000", "001", "002"))
+    assert not geom.frames_are_consecutive(("000", "002", "003"))
+
+
+def test_history_masks_render_camera():
+    assert geom.mask_render_camera(is_newest=False) is True
+    assert geom.mask_render_camera(is_newest=True) is False
+    assert geom.mask_render_camera(is_newest=True, mask_render_view=True) is True
+    cameras = (5, 4, 3)
+    masks = {
+        5: np.zeros((2, 2), dtype=bool),
+        4: np.zeros((2, 2), dtype=bool),
+        3: np.ones((2, 2), dtype=bool),
+    }
+    history = geom.build_car_keep_mask(
+        masks, cameras, (2, 2), render_camera=5, mask_render_view=True
+    )
+    newest = geom.build_car_keep_mask(
+        masks, cameras, (2, 2), render_camera=5, mask_render_view=False
+    )
+    assert history.shape == (3, 2, 2)
+    assert not history[0].any()
+    assert newest[0].all()
+    assert not newest[1].any()
+    assert newest[2].all()
+
+
 def test_real_nuscenes_files_if_present():
     scene_dir = REPO_ROOT / "data" / "nuscenes" / "processed_10Hz" / "trainval2" / "037"
     intr_path = scene_dir / "intrinsics" / "5.txt"
