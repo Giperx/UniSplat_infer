@@ -1,0 +1,401 @@
+"""numpy-only geometry/data helpers for single-frame nuScenes wide inference.
+
+This module deliberately has **no torch dependency** so it can be imported (and
+unit tested) without a GPU stack.  Image decoding uses PIL lazily, so importing
+the module only needs :mod:`numpy`.
+
+Two input conventions are supported by ``UniSplat`` single-frame inference:
+
+* The network input is aspect-scaled so its long side matches the training long
+  side (``train_long``) and the short side is snapped to a multiple of the
+  DINOv2 patch size.  There is **no centre crop**.
+* The wide render view keeps the resized render-camera focal length and
+  principal ``cy`` and only moves ``cx`` to the centre of the wider canvas.
+
+See ``scripts/inference_nuscenes_wide.py`` for the driver.
+"""
+
+from __future__ import annotations
+
+import math
+from pathlib import Path
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+
+import numpy as np
+
+# Per-camera nuScenes ego-car mask file names.  nuScenes camera ids 0..5 are
+# CAM_FRONT, CAM_FRONT_LEFT, CAM_FRONT_RIGHT, CAM_BACK_LEFT, CAM_BACK_RIGHT,
+# CAM_BACK; only the three cameras used by wide inference are mapped here.
+CAMERA_MASK_FILES: Dict[int, str] = {
+    3: "CAM_BACK_LEFT_mask.png",
+    4: "CAM_BACK_RIGHT_mask.png",
+    5: "CAM_BACK_mask.png",
+}
+
+# Mask polarity: black (< threshold) is the ego car to remove, white (>=) kept.
+CAR_MASK_KEEP_THRESHOLD = 128
+
+DEFAULT_TRAIN_LONG = 518
+DEFAULT_PATCH = 14
+DEFAULT_WIDTH_FACTOR = 3.0
+
+
+# ---------------------------------------------------------------------------
+# Resolution / intrinsics planning
+# ---------------------------------------------------------------------------
+
+
+def _round_half_up(value: float) -> int:
+    """Round to nearest integer, half away from zero (predictable, unlike round())."""
+    return int(math.floor(value + 0.5)) if value >= 0 else -int(math.floor(-value + 0.5))
+
+
+def plan_input_hw(
+    src_w: int, src_h: int, train_long: int = DEFAULT_TRAIN_LONG, patch: int = DEFAULT_PATCH
+) -> Tuple[int, int]:
+    """Plan the network input ``(out_h, out_w)`` for a ``src_w`` x ``src_h`` image.
+
+    The long side is matched to ``train_long`` (already a multiple of ``patch``
+    for the Waymo training canvas ``518``).  The short side is aspect-scaled and
+    snapped to the nearest multiple of ``patch`` (at least one patch step).  No
+    cropping is performed and the principal point is preserved by
+    :func:`scale_intrinsics`.
+
+    Reference: ``1600x900 -> (294, 518)`` because
+    ``round(900 * 518 / 1600 / 14) * 14 == 294``.
+    """
+    src_w, src_h = int(src_w), int(src_h)
+    patch = int(patch)
+    train_long = int(train_long)
+    if src_w <= 0 or src_h <= 0:
+        raise ValueError(f"Invalid source size {src_w}x{src_h}.")
+    if patch <= 0:
+        raise ValueError(f"patch must be positive, got {patch}.")
+    long_side = max(patch, train_long // patch * patch)
+
+    if src_w >= src_h:
+        out_w = long_side
+        out_h = max(patch, _round_half_up(src_h * (out_w / src_w) / patch) * patch)
+    else:
+        out_h = long_side
+        out_w = max(patch, _round_half_up(src_w * (out_h / src_h) / patch) * patch)
+    return out_h, out_w
+
+
+def intrinsics_from_params(fx: float, fy: float, cx: float, cy: float) -> np.ndarray:
+    """Build a 3x3 pinhole intrinsics matrix with last row ``[0, 0, 1]``."""
+    return np.array(
+        [[float(fx), 0.0, float(cx)], [0.0, float(fy), float(cy)], [0.0, 0.0, 1.0]],
+        dtype=np.float64,
+    )
+
+
+def scale_intrinsics(
+    K: np.ndarray, src_wh: Sequence[int], out_wh: Sequence[int]
+) -> np.ndarray:
+    """Independently scale ``K`` for a pure resize from ``src_wh`` to ``out_wh``.
+
+    ``src_wh`` and ``out_wh`` are ``(width, height)``.  ``fx``/``cx`` scale by
+    ``out_w / src_w`` and ``fy``/``cy`` by ``out_h / src_h``.  Because there is
+    no crop, the principal point is only scaled, never shifted.  The returned
+    matrix keeps a ``[0, 0, 1]`` last row.
+    """
+    K = np.asarray(K, dtype=np.float64).copy()
+    if K.shape != (3, 3):
+        raise ValueError(f"K must be 3x3, got shape {K.shape}.")
+    src_w, src_h = int(src_wh[0]), int(src_wh[1])
+    out_w, out_h = int(out_wh[0]), int(out_wh[1])
+    if src_w <= 0 or src_h <= 0:
+        raise ValueError(f"Invalid source size {src_w}x{src_h}.")
+    scale_x = out_w / src_w
+    scale_y = out_h / src_h
+    K[0, 0] *= scale_x
+    K[0, 2] *= scale_x
+    K[1, 1] *= scale_y
+    K[1, 2] *= scale_y
+    K[2] = (0.0, 0.0, 1.0)
+    return K
+
+
+def iround_hw(value: float) -> int:
+    """Round a float dimension to an int (half away from zero)."""
+    return _round_half_up(float(value))
+
+
+def wide_render_size(
+    out_wh: Sequence[int], width_factor: float = DEFAULT_WIDTH_FACTOR
+) -> Tuple[int, int]:
+    """Return ``(wide_h, wide_w)`` for the resized input ``out_wh=(out_w, out_h)``.
+
+    ``wide_h == out_h`` and ``wide_w == round(out_w * width_factor)`` (default 3x).
+    """
+    out_w, out_h = int(out_wh[0]), int(out_wh[1])
+    if float(width_factor) <= 0:
+        raise ValueError(f"width_factor must be positive, got {width_factor}.")
+    wide_w = iround_hw(out_w * float(width_factor))
+    return out_h, wide_w
+
+
+def make_wide_intrinsics(
+    K_resized: np.ndarray,
+    out_wh: Sequence[int],
+    width_factor: float = DEFAULT_WIDTH_FACTOR,
+) -> Tuple[np.ndarray, Tuple[int, int]]:
+    """Build the wide-view pixel K from the resized render-camera pixel K.
+
+    ``fx``, ``fy`` and ``cy`` are preserved; ``cx`` is moved to the centre of the
+    wide canvas ``wide_w / 2``.  Returns ``(K_wide, (wide_h, wide_w))``.
+    """
+    K_resized = np.asarray(K_resized, dtype=np.float64)
+    if K_resized.shape != (3, 3):
+        raise ValueError(f"K must be 3x3, got shape {K_resized.shape}.")
+    wide_h, wide_w = wide_render_size(out_wh, width_factor)
+    K_wide = K_resized.copy()
+    K_wide[0, 2] = wide_w / 2.0
+    K_wide[2] = (0.0, 0.0, 1.0)
+    return K_wide, (wide_h, wide_w)
+
+
+def intrinsics_to_fov(K: np.ndarray) -> Tuple[float, float]:
+    """Return ``(fovx, fovy)`` from pixel intrinsics (Waymo convention).
+
+    ``fovx = 2 * atan(cx / fx)`` and ``fovy = 2 * atan(cy / fy)``.  For the wide
+    view ``cx == wide_w / 2``, so ``fovx`` is the true widened horizontal FOV.
+    """
+    K = np.asarray(K, dtype=np.float64)
+    fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
+    fovx = 2.0 * math.atan(cx / fx)
+    fovy = 2.0 * math.atan(cy / fy)
+    return fovx, fovy
+
+
+# ---------------------------------------------------------------------------
+# Ego-car keep-mask indexing
+# ---------------------------------------------------------------------------
+
+
+def nonsky_drop_mask(keep: np.ndarray, sky: np.ndarray) -> np.ndarray:
+    """Return a 1-D drop mask over NON-sky pixels in flatten order.
+
+    ``keep`` and ``sky`` are bool ``[S, H, W]``; ``sky=True`` marks a sky pixel.
+    The pixel Gaussians produced by ``refine_guassians`` for the non-sky branch
+    are ordered by the flattened ``~sky`` pixels, so this helper reproduces that
+    ordering exactly (a sky pixel earlier in the image shifts the index of all
+    following non-sky pixels).  ``True`` means "drop" (i.e. ``keep`` is False).
+    """
+    keep = np.asarray(keep, dtype=bool)
+    sky = np.asarray(sky, dtype=bool)
+    if keep.shape != sky.shape:
+        raise ValueError(f"keep and sky must share a shape, got {keep.shape} and {sky.shape}.")
+    return ~keep.reshape(-1)[~sky.reshape(-1)]
+
+
+def sky_drop_mask(keep: np.ndarray, sky: np.ndarray) -> np.ndarray:
+    """Return a 1-D drop mask over SKY pixels in flatten order (mirror helper)."""
+    keep = np.asarray(keep, dtype=bool)
+    sky = np.asarray(sky, dtype=bool)
+    if keep.shape != sky.shape:
+        raise ValueError(f"keep and sky must share a shape, got {keep.shape} and {sky.shape}.")
+    sky_flat = sky.reshape(-1)
+    return ~keep.reshape(-1)[sky_flat]
+
+
+def build_car_keep_mask(
+    camera_masks: Dict[int, np.ndarray],
+    cameras: Sequence[int],
+    out_wh: Sequence[int],
+    render_camera: int,
+    mask_render_view: bool = False,
+    disable_car_mask: bool = False,
+) -> np.ndarray:
+    """Build the ``[S, H, W]`` per-view keep mask (``True`` = keep).
+
+    Default policy: every camera except the render camera uses its own mask;
+    the render camera is fully preserved unless ``mask_render_view`` is set.
+    ``disable_car_mask`` keeps every Gaussian for every view.  A required but
+    missing camera mask is an error.
+    """
+    out_w, out_h = int(out_wh[0]), int(out_wh[1])
+    cameras = [int(cam) for cam in cameras]
+    render_camera = int(render_camera)
+    keep = np.ones((len(cameras), out_h, out_w), dtype=bool)
+    if disable_car_mask:
+        return keep
+    for view_index, cam in enumerate(cameras):
+        if cam == render_camera and not mask_render_view:
+            continue
+        mask = camera_masks.get(cam)
+        if mask is None:
+            raise KeyError(f"No ego-car mask was loaded for camera {cam}.")
+        if mask.shape != (out_h, out_w):
+            raise ValueError(
+                f"Ego-car mask for camera {cam} has shape {mask.shape} but the "
+                f"model input is {out_h}x{out_w}."
+            )
+        keep[view_index] = mask
+    return keep
+
+
+# ---------------------------------------------------------------------------
+# File / text parsing
+# ---------------------------------------------------------------------------
+
+
+def parse_floats(text: str) -> List[float]:
+    return [float(tok) for tok in text.replace(",", " ").split()]
+
+
+def read_scene_list(path) -> List[str]:
+    """One scene id per non-empty line."""
+    return [line.strip() for line in Path(path).read_text().splitlines() if line.strip()]
+
+
+def parse_intrinsics_text(text: str) -> Tuple[float, float, float, float]:
+    """Parse the 9-value intrinsics file, returning ``(fx, fy, cx, cy)``.
+
+    The on-disk file is **not** a 3x3 matrix: it stores nine floats whose first
+    four are ``fx, fy, cx, cy`` and whose remaining entries are zeros.
+    """
+    values = parse_floats(text)
+    if len(values) < 4:
+        raise ValueError(f"Expected at least 4 intrinsic values, found {len(values)}.")
+    return values[0], values[1], values[2], values[3]
+
+
+def read_intrinsics(path) -> np.ndarray:
+    """Read an intrinsics txt file into a 3x3 pixel K matrix."""
+    fx, fy, cx, cy = parse_intrinsics_text(Path(path).read_text())
+    return intrinsics_from_params(fx, fy, cx, cy)
+
+
+def read_matrix(path, size: int = 4) -> np.ndarray:
+    """Read a flat ``size*size`` txt file into a ``size`` x ``size`` matrix."""
+    values = parse_floats(Path(path).read_text())
+    if len(values) != size * size:
+        raise ValueError(
+            f"Expected {size * size} values in {path}, found {len(values)}."
+        )
+    return np.asarray(values, dtype=np.float64).reshape(size, size)
+
+
+def read_cam2ego(path) -> np.ndarray:
+    """Read a 4x4 row-major OpenCV camera-to-ego transform."""
+    return read_matrix(path, size=4)
+
+
+def normalize_frame_id(frame, available: Optional[Iterable[str]] = None) -> str:
+    """Normalise a frame id to the zero-padded on-disk form (``0 -> 000``)."""
+    text = str(frame).strip()
+    if available is not None and text in set(available):
+        return text
+    if text.isdigit():
+        return f"{int(text):03d}"
+    return text
+
+
+def parse_cameras(text) -> Tuple[int, ...]:
+    cameras = tuple(int(tok) for tok in str(text).replace(",", " ").split())
+    if not cameras:
+        raise ValueError("At least one camera id is required.")
+    if len(set(cameras)) != len(cameras):
+        raise ValueError(f"Duplicate camera ids in {cameras}.")
+    return cameras
+
+
+# ---------------------------------------------------------------------------
+# Scene / frame enumeration and image IO (PIL imported lazily)
+# ---------------------------------------------------------------------------
+
+
+def scene_dir(data_root, scene) -> Path:
+    return Path(data_root) / str(scene)
+
+
+def enumerate_frames(
+    data_root,
+    scene,
+    cameras: Sequence[int],
+    max_frames: Optional[int] = None,
+    frame=None,
+) -> List[str]:
+    """Frames that have ``images/{frame:03d}_{cam}.jpg`` for every camera."""
+    images_dir = scene_dir(data_root, scene) / "images"
+    if not images_dir.is_dir():
+        return []
+    cameras = [int(cam) for cam in cameras]
+    suffixes = {f"_{cam}.jpg" for cam in cameras}
+    all_frames = set()
+    for entry in images_dir.iterdir():
+        if not entry.is_file():
+            continue
+        name = entry.name
+        for suffix in suffixes:
+            if name.endswith(suffix):
+                all_frames.add(name[: -len(suffix)])
+                break
+    frames = sorted(
+        frame_id
+        for frame_id in all_frames
+        if all((images_dir / f"{frame_id}_{cam}.jpg").is_file() for cam in cameras)
+    )
+    if frame is not None:
+        wanted = normalize_frame_id(frame, frames)
+        return [wanted] if wanted in frames else []
+    if max_frames is not None and max_frames >= 0:
+        frames = frames[:max_frames]
+    return frames
+
+
+def load_rgb_resized(path, out_wh: Sequence[int]) -> np.ndarray:
+    """Load a jpg as RGB, resize with LANCZOS to ``out_wh=(w,h)``, ``[0,1]`` float32 HWC."""
+    from PIL import Image
+
+    out_w, out_h = int(out_wh[0]), int(out_wh[1])
+    with Image.open(path) as image:
+        image = image.convert("RGB")
+        if image.size != (out_w, out_h):
+            image = image.resize((out_w, out_h), Image.LANCZOS)
+        array = np.asarray(image, dtype=np.float32) / 255.0
+    return array
+
+
+def load_keep_mask_resized(path, out_wh: Sequence[int]) -> np.ndarray:
+    """Load an ego-car mask, NEAREST-resize to ``out_wh``, return bool keep.
+
+    Same source scale as the RGB images and no crop; ``True`` = keep (>= 128).
+    """
+    from PIL import Image
+
+    out_w, out_h = int(out_wh[0]), int(out_wh[1])
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(f"Missing ego-car mask: {path}")
+    with Image.open(path) as image:
+        mask = image.convert("L")
+        if mask.size != (out_w, out_h):
+            mask = mask.resize((out_w, out_h), Image.NEAREST)
+        array = np.asarray(mask)
+    return array >= CAR_MASK_KEEP_THRESHOLD
+
+
+def camera_mask_path(mask_root, cam: int) -> Path:
+    """Path of ``cam``'s nuScenes ego-car mask under ``mask_root``."""
+    cam = int(cam)
+    if cam not in CAMERA_MASK_FILES:
+        raise KeyError(
+            f"No nuScenes ego-car mask defined for camera {cam}; known are "
+            f"{sorted(CAMERA_MASK_FILES)}."
+        )
+    return Path(mask_root) / CAMERA_MASK_FILES[cam]
+
+
+def load_camera_keep_masks(
+    mask_root, cameras: Sequence[int], out_wh: Sequence[int]
+) -> Dict[int, np.ndarray]:
+    """Load every selected camera's keep mask, failing loudly when missing."""
+    masks: Dict[int, np.ndarray] = {}
+    for cam in cameras:
+        cam = int(cam)
+        path = camera_mask_path(mask_root, cam)
+        masks[cam] = load_keep_mask_resized(path, out_wh)
+    return masks

@@ -114,14 +114,16 @@ class GuassianHead(nn.Module):
             out_dim=1024, rope=self.rope,)
    
     def forward(self, aggregated_tokens_list, images, patch_start_idx, input_dict_gs, output_dict_gs, \
-                test=True, stage=3):
+                test=True, stage=3, source_keep_mask=None):
         if test:
             return self.test(aggregated_tokens_list, images, patch_start_idx, \
-                input_dict_gs=input_dict_gs, output_dict_gs=output_dict_gs)
+                input_dict_gs=input_dict_gs, output_dict_gs=output_dict_gs, \
+                source_keep_mask=source_keep_mask)
         return self._forward_impl(aggregated_tokens_list, images, patch_start_idx, \
             input_dict_gs=input_dict_gs, output_dict_gs=output_dict_gs, stage=stage)
 
-    def test(self, aggregated_tokens_list, images, patch_start_idx, input_dict_gs, output_dict_gs):
+    def test(self, aggregated_tokens_list, images, patch_start_idx, input_dict_gs, output_dict_gs, \
+             source_keep_mask=None):
 
         B, S, _, H, W = images.shape
         
@@ -229,6 +231,21 @@ class GuassianHead(nn.Module):
             mask = (means[:, 0] > boundary[0]) & (means[:, 0] < boundary[3]) & \
                    (means[:, 1] > boundary[1]) & (means[:, 1] < boundary[4]) & \
                    (means[:, 2] > boundary[2]) & (means[:, 2] < boundary[5])
+            # Ego-car pixels must not seed voxels either. Pixel Gaussians are
+            # zeroed later; the voxel branch is a scatter of these same points
+            # and would otherwise still reconstruct the masked car.
+            if source_keep_mask is not None:
+                keep = source_keep_mask
+                if keep.ndim == 3:
+                    keep = keep[None]
+                keep_i = keep[0] if keep.shape[0] == 1 else keep[i]
+                keep_flat = keep_i.reshape(-1).to(device=mask.device, dtype=torch.bool)
+                if keep_flat.numel() != mask.numel():
+                    raise ValueError(
+                        f"source_keep_mask has {keep_flat.numel()} pixels but "
+                        f"pixel means have {mask.numel()}."
+                    )
+                mask = mask & keep_flat
             count = mask.sum()
             batch_idx = means.new_zeros((count, 1)) + i
             batch_idx = batch_idx.int()
@@ -373,6 +390,15 @@ class GuassianHead(nn.Module):
             gaussians_source1, gaussians_source1_dynscore, gaussians_sky,  gaussians_sky_dynscore \
                 = self.refine_guassians(save_features[save_coords[:,0]==i], save_coords[save_coords[:,0]==i], \
                 pixel_means[i], sky_mask[i], img_guassian_features[i])
+            if source_keep_mask is not None:
+                # Zero out the opacity of pixel Gaussians whose source pixel is
+                # not kept (e.g. the ego-car mask on non-render cameras). Rows are
+                # preserved so the per-pixel ordering stays intact. Masked pixels
+                # are also excluded from voxel seeding above; remaining voxel
+                # Gaussians have no 1:1 pixel index, so they are not edited here.
+                gaussians_source1, gaussians_sky = self._apply_source_keep_mask(
+                    gaussians_source1, gaussians_sky, sky_mask[i],
+                    source_keep_mask, i, B)
             # process memory gaussians
             extra_gaussians_outview = self.process_history_gaussians(history_gaussians[i], history_gaussians_outview[i], \
                 current_lidar2world[i], history_lidar2world[i], intrinsics[i], camera2lidar[i], gaussians_source1[:,:3].detach(), W, H)
@@ -969,6 +995,70 @@ class GuassianHead(nn.Module):
         sky_gaussians = torch.cat([sky_means, sky_rgbs, sky_opacities, sky_rotations, sky_scales], dim=-1)
         
         return gaussians, dynamic, sky_gaussians, sky_dynamic
+
+    def _apply_source_keep_mask(self, gaussians_nonsky, gaussians_sky, sky_mask_i, \
+                                source_keep_mask, batch_index, batch_size):
+        """Zero pixel-Gaussian opacity where the source pixel is not kept.
+
+        The non-sky ``gaussians_nonsky`` rows are ordered by the flattened
+        non-sky pixels (``~sky_mask``) and the ``gaussians_sky`` rows by the
+        flattened sky pixels (see :meth:`refine_guassians`), so the keep mask is
+        gathered with the same ordering. Opacity is column 6 (already
+        sigmoid-activated) and is only overwritten, never removed, so row counts
+        and ordering are unchanged. ``source_keep_mask`` may be ``[S, H, W]`` or
+        ``[B, S, H, W]`` with ``True`` = keep. Branches with zero rows are
+        skipped.
+        """
+        keep = source_keep_mask
+        if keep.ndim == 3:
+            keep = keep[None]
+        if keep.ndim != 4:
+            raise ValueError(
+                f"source_keep_mask must be [S, H, W] or [B, S, H, W], got shape "
+                f"{tuple(keep.shape)}."
+            )
+        if keep.shape[0] not in (1, batch_size):
+            raise ValueError(
+                f"source_keep_mask batch {keep.shape[0]} does not match batch size "
+                f"{batch_size}."
+            )
+        keep = keep.to(device=gaussians_nonsky.device, dtype=torch.bool)
+        keep_i = keep[0] if keep.shape[0] == 1 else keep[batch_index]
+        keep_flat = keep_i.reshape(-1)
+        sky_flat = sky_mask_i.reshape(-1).to(torch.bool)
+        if keep_flat.numel() != sky_flat.numel():
+            raise ValueError(
+                f"source_keep_mask has {keep_flat.numel()} pixels but sky_mask has "
+                f"{sky_flat.numel()}."
+            )
+
+        # Non-sky branch aligns with the flattened ~sky pixels.
+        if gaussians_nonsky.shape[0] > 0:
+            nonsky_keep = keep_flat[~sky_flat]
+            if nonsky_keep.numel() != gaussians_nonsky.shape[0]:
+                raise ValueError(
+                    f"source_keep_mask selects {nonsky_keep.numel()} non-sky pixels "
+                    f"but there are {gaussians_nonsky.shape[0]} non-sky Gaussians."
+                )
+            drop = ~nonsky_keep
+            if drop.any():
+                gaussians_nonsky = gaussians_nonsky.clone()
+                gaussians_nonsky[drop, 6] = 0.0
+
+        # Sky branch aligns with the flattened sky pixels.
+        if gaussians_sky.shape[0] > 0:
+            sky_keep = keep_flat[sky_flat]
+            if sky_keep.numel() != gaussians_sky.shape[0]:
+                raise ValueError(
+                    f"source_keep_mask selects {sky_keep.numel()} sky pixels but "
+                    f"there are {gaussians_sky.shape[0]} sky Gaussians."
+                )
+            drop = ~sky_keep
+            if drop.any():
+                gaussians_sky = gaussians_sky.clone()
+                gaussians_sky[drop, 6] = 0.0
+
+        return gaussians_nonsky, gaussians_sky
 
     def get_dynamic_gs_mask(self, dynamics_region, means, intrinsics, camera2lidars):
         S, H, W = dynamics_region.shape

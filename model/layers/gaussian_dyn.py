@@ -200,6 +200,19 @@ class GaussianRenderer_dyn:
         device = gaussians.device
         V = c2w.shape[0]
 
+        # Raster resolution follows the per-view H, W when provided (Waymo/wide
+        # inference pass tensors of shape [V]); otherwise fall back to the
+        # configured resolution. All views must share the same raster size.
+        if H is not None and W is not None:
+            view_h = [int(H[v]) for v in range(V)]
+            view_w = [int(W[v]) for v in range(V)]
+            assert len(set(view_h)) == 1 and len(set(view_w)) == 1, (
+                f"All views must share the same raster size, got H={view_h}, W={view_w}."
+            )
+            out_h, out_w = view_h[0], view_w[0]
+        else:
+            out_h, out_w = int(self.resolution[0]), int(self.resolution[1])
+
         # loop of loop...
         images = []
         dyns = []
@@ -219,8 +232,8 @@ class GaussianRenderer_dyn:
             fovy_ = fovy[v].clone()
             c2w_ = c2w[v].clone()
             K_ = K[v].clone()
-            H_ = H[v]
-            W_ = W[v]
+            H_ = H[v] if H is not None else out_h
+            W_ = W[v] if W is not None else out_w
             w2c, proj, cam_p = get_cam_info_gaussian_v2(
                 c2w=c2w_, K=K_, H=H_, W=W_, znear=self.znear, zfar=self.zfar
             )
@@ -230,8 +243,8 @@ class GaussianRenderer_dyn:
 
             if self.renderer_type == "vanilla":
                 raster_settings = GaussianRasterizationSettings_feature(
-                    image_height=self.resolution[0],
-                    image_width=self.resolution[1],
+                    image_height=out_h,
+                    image_width=out_w,
                     tanfovx=tan_half_fovx,
                     tanfovy=tan_half_fovy,
                     bg=self.bg_color if bg_color is None else bg_color,
@@ -269,9 +282,9 @@ class GaussianRenderer_dyn:
             dyns.append(feature_map)
             depths.append(rendered_depth)
 
-        images = torch.stack(images, dim=0).view(V, 3, self.resolution[0], self.resolution[1])
-        dyns = torch.stack(dyns, dim=0).view(V, 1, self.resolution[0], self.resolution[1])
-        depths = torch.stack(depths, dim=0).view(V, 1, self.resolution[0], self.resolution[1])
+        images = torch.stack(images, dim=0).view(V, 3, out_h, out_w)
+        dyns = torch.stack(dyns, dim=0).view(V, 1, out_h, out_w)
+        depths = torch.stack(depths, dim=0).view(V, 1, out_h, out_w)
 
         return {
             "image": images, # [V, 3, H, W]

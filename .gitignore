@@ -154,3 +154,13 @@ work_dirs
 .vscode/
 .omo/
 .claude/
+.slim/deepwork/
+
+tmp*.md
+outputs/
+data
+
+pretrained
+
+.slim/deepwork/
+.slim/deepwork/**
