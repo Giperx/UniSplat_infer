@@ -5,7 +5,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch_scatter
-from model.loss_func.percept_loss import LPIPS
+# Inference does not use LPIPS. Constructing it downloads weights into ./taming.
+# from model.loss_func.percept_loss import LPIPS
 from ..layers.patch_embed import PatchEmbed
 from ..layers.gaussian_dyn import GaussianRenderer_dyn
 from ..layers.spconv_unet import get_voxel_centers, project_world_points_to_images
@@ -77,8 +78,9 @@ class GuassianHead(nn.Module):
         self.renderer = GaussianRenderer_dyn(resolution = [render_h, render_w], znear = 0.1, zfar = 1000.0)
         self.cfg = cfg
 
-        # loss
-        self.perceptual_loss = LPIPS().eval()
+        # loss — LPIPS is training-only and pulls taming weights on init.
+        # self.perceptual_loss = LPIPS().eval()
+        self.perceptual_loss = None
         self.loss_weight = cfg.get('Loss_weight', None)
         self.l1_loss_mask = cfg.get('l1_loss_mask', None)
         self.p_loss_mask = cfg.get('p_loss_mask', None)
@@ -859,14 +861,15 @@ class GuassianHead(nn.Module):
         rec_loss = rec_loss.mean()
         loss_dict["rec_loss"] = rec_loss * 1.0 if self.loss_weight is None else rec_loss * self.loss_weight['rec_loss']
 
-        # perceptual loss
-        p_loss = self.perceptual_loss(rgb_render.reshape(-1, 3, H, W), rgb_gt.reshape(-1, 3, H, W))
-        if self.p_loss_mask is not None:
-            mask = torch.tensor(self.p_loss_mask, dtype=dtype, device=device_id)
-            mask = mask[select_index]
-            p_loss = p_loss * mask[:, None, None, None]
-        p_loss = p_loss.mean()
-        loss_dict["perceptual_loss"] = p_loss * 0.05 if self.loss_weight is None else p_loss * self.loss_weight['perceptual_loss']
+        # perceptual loss (temporarily disabled; uncomment with LPIPS() above to restore)
+        # p_loss = self.perceptual_loss(rgb_render.reshape(-1, 3, H, W), rgb_gt.reshape(-1, 3, H, W))
+        # if self.p_loss_mask is not None:
+        #     mask = torch.tensor(self.p_loss_mask, dtype=dtype, device=device_id)
+        #     mask = mask[select_index]
+        #     p_loss = p_loss * mask[:, None, None, None]
+        # p_loss = p_loss.mean()
+        # loss_dict["perceptual_loss"] = p_loss * 0.05 if self.loss_weight is None else p_loss * self.loss_weight['perceptual_loss']
+        loss_dict["perceptual_loss"] = rgb_render.new_zeros(())
 
         # dynamic head loss (BCE on input-view rendered dyn vs gt dyn region)
         S_in = dyn_gt.shape[0]

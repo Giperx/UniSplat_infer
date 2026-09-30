@@ -140,6 +140,8 @@ def main():
     model.load_state_dict(weight, strict=False)
     model = model.to(device)
     model.eval()
+    # Empty pixels (no Gaussian coverage) render white instead of the rasterizer default black.
+    model.gaussian_head.renderer.bg_color = torch.tensor([1.0, 1.0, 1.0], dtype=torch.float32, device=device)
 
     from PIL import Image  # RGB size probing
     from dataset.waymo import get_ray_directions, get_rays
