@@ -32,7 +32,7 @@ PRESETS = {
     "nuscenes": {
         "style": "sparse",
         "gt_root": "data/nuscenes/sparseMultiplaneImages3_1554x294",
-        "val_list": "data/nuscenes/processed_10Hz/trainval2/nuScenes_Val2.txt",
+        "val_list": "data/nuscenes/processed_10Hz/trainval2/nuScenes_Val.txt",
         "single_render": "outputs/nuscenes_wide",
         "multi_render": "outputs/nuscenes_wide_multiframes",
         "car_mask": "data/nuscenes/processed_10Hz/nuscenes_mask/CAM_BACK_mask.png",

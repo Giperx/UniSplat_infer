@@ -64,7 +64,7 @@ DATASETS: Dict[str, DatasetPreset] = {
     "nuscenes": DatasetPreset(
         name="nuscenes",
         data_root="data/nuscenes/processed_10Hz/trainval2",
-        scene_list_name="nuScenes_Val2.txt",
+        scene_list_name="nuScenes_Val.txt",
         mask_kind="nuscenes",
         mask_root="data/nuscenes/processed_10Hz/nuscenes_mask",
         mask_ext="png",
