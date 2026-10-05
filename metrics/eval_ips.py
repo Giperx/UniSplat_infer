@@ -1,5 +1,8 @@
 """Seam low-frequency gradient on UniSplat wide renders. No GT image is required.
 
+Kept for comparison. ``metrics/run_wide.sh`` does not call this script.
+Use ``metrics/eval_consistency.py`` for CBSR and PD.
+
 IPS is the mean horizontal gradient of a Gaussian low-pass field, reported on
 the 0-255 scale, at the left and right third-boundaries. This matches
 widedrive_IPS.py. The primary score uses no mask. A gt_mask row, when a

@@ -1,5 +1,8 @@
 """Color-seam step on UniSplat wide renders. No ground-truth image is required.
 
+Kept for comparison. ``metrics/run_wide.sh`` does not call this script.
+Use ``metrics/eval_consistency.py`` for CBSR and PD.
+
 CRCS is the mean absolute horizontal color step, in 0-255 units, at the left
 and right third-boundaries and over the whole image. This matches
 widedrive_CRCS.py. UniSplat has no render alpha mask, so the primary score is

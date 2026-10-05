@@ -10,7 +10,8 @@
 # Multi-frame renders:  outputs/<dataset>_wide_multiframes/<scene>/rgb/{newest}_5_wide.jpg
 # Do not pass --output-dir. Metrics read those two directories.
 #
-# Photometric and histogram-matched scores need GT. CRCS and IPS do not.
+# Photometric and histogram-matched scores need GT.
+# CBSR and PD do not. eval_crcs.py and eval_ips.py are kept but not called.
 # nuScenes sparse GT is expected at data/nuscenes/sparseMultiplaneImages3_1554x294
 # and is not in this checkout; photometric/HM are skipped until that directory exists.
 # The first photometric run may download LPIPS AlexNet weights.
@@ -206,17 +207,10 @@ run_metrics() {
   else
     echo "GT root missing, skip photometric/HM: $GT_ROOT" >&2
   fi
-  echo "CRCS -> $render_root"
-  python metrics/eval_crcs.py \
+  echo "CBSR and PD -> $render_root"
+  python metrics/eval_consistency.py \
     --dataset "$DATASET" \
     --render-root "$render_root" \
-    --gt-root "$GT_ROOT" \
-    "${val_args[@]}"
-  echo "IPS -> $render_root"
-  python metrics/eval_ips.py \
-    --dataset "$DATASET" \
-    --render-root "$render_root" \
-    --gt-root "$GT_ROOT" \
     "${val_args[@]}"
 }
 
