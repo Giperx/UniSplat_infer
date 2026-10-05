@@ -177,8 +177,34 @@ def test_fill_preset_widedrive_disables_mask():
     assert args.output_dir == "outputs/widedrive_wide"
 
 
+def test_locate_renamed_split_folders():
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        split = root / "ddad_process" / "valid"
+        split.mkdir(parents=True)
+        (split / "valid.txt").write_text("000\n")
+        found = geom.locate_dir(root / "ddad" / "valid")
+        assert found == split
+        listed = geom.locate_file(root / "ddad" / "valid" / "valid.txt")
+        assert listed == split / "valid.txt"
+        sibling = root / "trainval"
+        sibling.mkdir()
+        (sibling / "nuScenes_Val.txt").write_text("002\n")
+        (root / "trainval2").mkdir()
+        listed = geom.locate_file(root / "trainval2" / "nuScenes_Val.txt")
+        assert listed == sibling / "nuScenes_Val.txt"
+        only_alias = split / "valid2.txt"
+        only_alias.write_text("001\n")
+        (split / "valid.txt").unlink()
+        listed = geom.locate_file(root / "ddad" / "val" / "valid.txt")
+        assert listed == only_alias
+
+
 def test_real_dataset_masks_if_present():
-    ddad = REPO_ROOT / "data" / "ddad" / "valid" / "000" / "ego_car_masks" / "5.jpg"
+    ddad_root = geom.locate_dir(REPO_ROOT / "data" / "ddad" / "valid")
+    ddad = (ddad_root / "000" / "ego_car_masks" / "5.jpg") if ddad_root else Path("missing")
     lyft = REPO_ROOT / "data" / "lyft" / "lyft_val1920_3cams" / "ego_car_masks" / "5.jpg"
     wide = REPO_ROOT / "data" / "WideDrive_processed" / "WideDriveVal" / "val.txt"
     if not ddad.is_file() or not lyft.is_file() or not wide.is_file():

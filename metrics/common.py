@@ -7,7 +7,9 @@ saves only the newest frame of each window, so pairing by frame id is enough.
 
 from __future__ import annotations
 
+import importlib.util
 import re
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -87,11 +89,32 @@ def add_common_args(parser):
     parser.add_argument("--image-dir", default="rgb")
 
 
+def _layout():
+    """Load the inference path locator without importing dataset/__init__.py."""
+    module = globals().get("_LAYOUT")
+    if module is not None:
+        return module
+    path = Path(__file__).resolve().parents[1] / "dataset" / "nuscenes_wide.py"
+    spec = importlib.util.spec_from_file_location("unisplat_nuscenes_wide_layout", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    globals()["_LAYOUT"] = module
+    return module
+
+
 def resolve(args):
     preset = PRESETS[args.dataset]
+    layout = _layout()
     render_root = Path(args.render_root or preset["single_render"])
     gt_root = Path(args.gt_root or preset["gt_root"])
     val_list = Path(args.val_list or preset["val_list"])
+    gt_found = layout.locate_dir(gt_root)
+    if gt_found is not None:
+        gt_root = gt_found
+    listed = layout.locate_file(val_list)
+    if listed is not None:
+        val_list = listed
     return preset, render_root, gt_root, val_list
 
 

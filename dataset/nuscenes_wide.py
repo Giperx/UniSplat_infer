@@ -18,6 +18,7 @@ See ``scripts/inference_nuscenes_wide.py`` for the driver.
 from __future__ import annotations
 
 import math
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
@@ -104,6 +105,155 @@ DATASETS: Dict[str, DatasetPreset] = {
 }
 
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+# On-disk names that refer to the same split. The first existing candidate wins,
+# with the name the caller asked for preferred over the aliases.
+DIR_ALIAS_GROUPS = (
+    ("ddad", "ddad_process"),
+    ("valid", "val", "validation"),
+    ("trainval", "trainval2"),
+    ("nuscenes_mask", "corrected_masks"),
+)
+LIST_ALIAS_GROUPS = (
+    ("valid.txt", "valid2.txt", "val.txt", "validation.txt"),
+    ("nuScenes_Val.txt", "nuScenes_Val2.txt"),
+    ("nuScenes_Train.txt", "nuScenes_Train2.txt"),
+    ("lyft_val1920.txt", "lyft_val19202.txt"),
+    ("lyft_val1224.txt", "lyft_val12242.txt"),
+    ("val.txt", "valid.txt", "valid2.txt"),
+)
+
+
+def _as_repo_path(path) -> Path:
+    path = Path(path).expanduser()
+    return path if path.is_absolute() else (REPO_ROOT / path)
+
+
+def _alias_names(name: str, groups) -> List[str]:
+    ordered = [name]
+    for group in groups:
+        if name not in group:
+            continue
+        for item in group:
+            if item not in ordered:
+                ordered.append(item)
+    return ordered
+
+
+def locate_dir(path) -> Optional[Path]:
+    """Return ``path`` or the same path with a renamed parent folder.
+
+    ``data/ddad/valid`` is accepted when the checkout stores it as
+    ``data/ddad_process/valid``. An existing directory is never rewritten.
+    """
+    path = _as_repo_path(path)
+    if path.is_dir():
+        return path
+    if path.is_absolute():
+        current = Path(path.anchor)
+        parts = path.parts[1:]
+    else:
+        current = Path()
+        parts = path.parts
+    for part in parts:
+        exact = current / part
+        if exact.is_dir():
+            current = exact
+            continue
+        found = None
+        for alias in _alias_names(part, DIR_ALIAS_GROUPS):
+            cand = current / alias
+            if cand.is_dir():
+                found = cand
+                break
+        if found is None:
+            return None
+        current = found
+    return current if current.is_dir() else None
+
+
+def _remember_dir(dirs: List[Path], directory: Path) -> None:
+    if directory.is_dir() and directory not in dirs:
+        dirs.append(directory)
+
+
+def locate_file(path, extra_dirs=()) -> Optional[Path]:
+    """Find a scene list under renamed split folders or aliased filenames.
+
+    Search order is the exact path, then known filenames in the resolved
+    directory, then the same names in a sibling split (``trainval2`` <->
+    ``trainval``, ``valid`` <-> ``val``).
+    """
+    path = _as_repo_path(path)
+    if path.is_file():
+        return path
+    names = _alias_names(path.name, LIST_ALIAS_GROUPS)
+    dirs: List[Path] = []
+    parent = locate_dir(path.parent)
+    if parent is not None:
+        _remember_dir(dirs, parent)
+    bases = []
+    if parent is not None:
+        bases.append(parent)
+    if path.parent != parent:
+        bases.append(path.parent)
+    for base in bases:
+        grand = base.parent
+        located_grand = grand if grand.is_dir() else locate_dir(grand)
+        if located_grand is None:
+            continue
+        for alias in _alias_names(base.name, DIR_ALIAS_GROUPS):
+            _remember_dir(dirs, located_grand / alias)
+        _remember_dir(dirs, located_grand)
+    for extra in extra_dirs:
+        extra_path = Path(extra)
+        _remember_dir(dirs, extra_path)
+        if extra_path.parent.is_dir():
+            for alias in _alias_names(extra_path.name, DIR_ALIAS_GROUPS):
+                _remember_dir(dirs, extra_path.parent / alias)
+    for directory in dirs:
+        for name in names:
+            cand = directory / name
+            if cand.is_file():
+                return cand
+    return None
+
+
+def locate_mask_root(path, data_root, mask_kind: str) -> Optional[Path]:
+    """Find an ego-car mask directory when its folder was renamed."""
+    if not path:
+        return None
+    found = locate_dir(path)
+    if found is not None:
+        return found
+    root = locate_dir(data_root) or _as_repo_path(data_root)
+    if mask_kind == "nuscenes":
+        candidates = (
+            root / "nuscenes_mask",
+            root.parent / "nuscenes_mask",
+            root.parent.parent / "nuscenes_mask",
+            root.parent / "corrected_masks",
+        )
+    elif mask_kind == "lyft":
+        candidates = (root / "ego_car_masks", root.parent / "ego_car_masks")
+    elif mask_kind == "ddad":
+        candidates = (root,)
+    else:
+        candidates = ()
+    for cand in candidates:
+        if cand.is_dir():
+            return cand
+    return None
+
+
+def _note_relocated(kind: str, requested, found: Path) -> None:
+    requested_path = _as_repo_path(requested)
+    if requested_path.resolve() == found.resolve():
+        return
+    print(f"[data] {kind}: {requested_path} -> {found}", file=sys.stderr)
+
+
 def get_preset(name: str) -> DatasetPreset:
     key = str(name).strip().lower()
     if key not in DATASETS:
@@ -136,6 +286,19 @@ def fill_preset_args(args, multi: bool = False):
     args.mask_ext = preset.mask_ext or "png"
     if preset.mask_kind == "none":
         args.disable_car_mask = True
+    root = locate_dir(args.data_root)
+    if root is not None:
+        _note_relocated("data_root", args.data_root, root)
+        args.data_root = str(root)
+    listed = locate_file(args.scene_list, extra_dirs=(args.data_root,))
+    if listed is not None:
+        _note_relocated("scene_list", args.scene_list, listed)
+        args.scene_list = str(listed)
+    if getattr(args, "car_mask_root", None) and not args.disable_car_mask:
+        mask = locate_mask_root(args.car_mask_root, args.data_root, args.mask_kind)
+        if mask is not None:
+            _note_relocated("car_mask_root", args.car_mask_root, mask)
+            args.car_mask_root = str(mask)
     return args
 
 
