@@ -276,6 +276,62 @@ def format_bucket(rows, names, formatter):
     return "  ".join(parts)
 
 
+# Equal weight on the reported region means. Not the pixel-weighted Overall,
+# and not Center_masked. WideDrive already has a full-image score, so callers
+# skip these for dense reports.
+EQUAL_REGION_MEANS = (
+    ("Mean_LR", ("Left", "Right")),
+    ("Mean_LRC", ("Left", "Right", "Center")),
+)
+
+
+def format_equal_region_means(buckets, names, formatter, indent=""):
+    """(Left+Right)/2 and (Left+Right+Center)/3 of the region means.
+
+    A metric is included only when every region in the group has a finite
+    value, so sparse Left/Right LPIPS is left out instead of dividing Center
+    by three.
+    """
+    lines = []
+    for label, regions in EQUAL_REGION_MEANS:
+        stats = []
+        counts = []
+        missing = False
+        for region in regions:
+            rows = buckets.get(region) or []
+            if not rows:
+                missing = True
+                break
+            region_stats = {}
+            for name in names:
+                values = [
+                    row[name]
+                    for row in rows
+                    if name in row and row[name] is not None and np.isfinite(row[name])
+                ]
+                if values:
+                    region_stats[name] = float(np.mean(values))
+            stats.append(region_stats)
+            counts.append(len(rows))
+        if missing:
+            continue
+        shared = set(stats[0])
+        for region_stats in stats[1:]:
+            shared &= set(region_stats)
+        parts = []
+        if counts and len(set(counts)) == 1:
+            parts.append(f"n={counts[0]}")
+        for name in names:
+            if name not in shared:
+                continue
+            value = sum(region_stats[name] for region_stats in stats) / len(regions)
+            parts.append(f"{name.upper()}={formatter(name, value)}")
+        if not any(part.startswith(("PSNR=", "MAE=", "SSIM=", "LPIPS=", "VALUE=")) for part in parts):
+            continue
+        lines.append(f"{indent}{label:20s}: {'  '.join(parts)}\n")
+    return "".join(lines)
+
+
 def write_bucket(handle, keys, buckets, names, formatter, indent=""):
     for key in keys:
         text = format_bucket(buckets.get(key, []), names, formatter)

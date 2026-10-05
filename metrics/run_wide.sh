@@ -12,6 +12,10 @@
 #
 # Photometric and histogram-matched scores need GT.
 # CBSR and PD do not. eval_crcs.py and eval_ips.py are kept but not called.
+# Sparse reports also write Mean_LR and Mean_LRC. WideDrive does not: it has Full.
+# Lyft 1920 and 1224 are one dataset. After either subset is scored, a
+# frame-count-weighted total is written under outputs/lyft1920_wide*
+# when the other subset's report is already there.
 # nuScenes sparse GT is expected at data/nuscenes/sparseMultiplaneImages3_1554x294
 # and is not in this checkout; photometric/HM are skipped until that directory exists.
 # The first photometric run may download LPIPS AlexNet weights.
@@ -254,3 +258,8 @@ if [[ "$SKIP_INFER" -eq 0 ]]; then
   run_infer "$INFER_SCRIPT"
 fi
 run_metrics "$RENDER_ROOT"
+
+if [[ "$DATASET" == "lyft1920" || "$DATASET" == "lyft1224" ]]; then
+  echo "Lyft combined summary (frame-count weighted) -> outputs/lyft1920_*"
+  python metrics/merge_lyft.py --mode "$MODE"
+fi

@@ -26,6 +26,7 @@ from common import (
     collect_renders,
     find_gt,
     fmt_photometric,
+    format_equal_region_means,
     load_binary_mask,
     load_rgb,
     load_scene_ids,
@@ -159,6 +160,8 @@ def main():
             "LPIPS (alex, spatial) is computed on Center and Center_masked only.",
             "Center_masked is the GT mask AND the ego-car mask. Values above 127 are valid.",
             "Overall is the pixel-weighted mean of Left, Center, and Right, not Center_masked.",
+            "Mean_LR is (Left+Right)/2 and Mean_LRC is (Left+Right+Center)/3 of those region means.",
+            "Those two means use equal weight on the reported region scores. They are not pixel-weighted, and they exclude Center_masked.",
             "Histogram matching, when enabled, is done independently inside each region mask.",
         ])
     else:
@@ -179,10 +182,18 @@ def main():
     with handle:
         handle.write("\n" + "=" * 80 + "\nSummary\n" + "=" * 80 + "\n")
         write_bucket(handle, keys, global_buckets, PHOTOMETRIC_NAMES, fmt_photometric)
+        if style == "sparse":
+            handle.write(format_equal_region_means(global_buckets, PHOTOMETRIC_NAMES, fmt_photometric))
         handle.write("\n" + "=" * 80 + "\nPer-scene\n" + "=" * 80 + "\n")
         for scene in sorted(scene_buckets):
             handle.write(f"\nScene {scene}:\n")
             write_bucket(handle, keys, scene_buckets[scene], PHOTOMETRIC_NAMES, fmt_photometric, indent="  ")
+            if style == "sparse":
+                handle.write(
+                    format_equal_region_means(
+                        scene_buckets[scene], PHOTOMETRIC_NAMES, fmt_photometric, indent="  ",
+                    )
+                )
         if missing_scenes:
             handle.write("\nScenes in the val list with no render directory:\n")
             for scene in missing_scenes:
