@@ -124,5 +124,6 @@ def main():
     print(f"Wrote {out_path}", flush=True)
 
 
-if __name__ == "__main__":
-    main()
+# Temporarily disabled. Wide measurement does not score CBSR and PD.
+# if __name__ == "__main__":
+#     main()

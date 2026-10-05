@@ -11,7 +11,8 @@
 # Do not pass --output-dir. Metrics read those two directories.
 #
 # Photometric and histogram-matched scores need GT.
-# CBSR and PD do not. eval_crcs.py and eval_ips.py are kept but not called.
+# CBSR and PD (eval_consistency.py) are paused and not called.
+# eval_crcs.py and eval_ips.py are kept but not called.
 # Sparse reports also write Mean_LR and Mean_LRC. WideDrive does not: it has Full.
 # Lyft 1920 and 1224 are one dataset. After either subset is scored, a
 # frame-count-weighted total is written under outputs/lyft1920_wide*
@@ -211,11 +212,12 @@ run_metrics() {
   else
     echo "GT root missing, skip photometric/HM: $GT_ROOT" >&2
   fi
-  echo "CBSR and PD -> $render_root"
-  python metrics/eval_consistency.py \
-    --dataset "$DATASET" \
-    --render-root "$render_root" \
-    "${val_args[@]}"
+  # Temporarily disabled. Do not score CBSR and PD.
+  # echo "CBSR and PD -> $render_root"
+  # python metrics/eval_consistency.py \
+  #   --dataset "$DATASET" \
+  #   --render-root "$render_root" \
+  #   "${val_args[@]}"
 }
 
 if [[ "$MODE" == "single" ]]; then

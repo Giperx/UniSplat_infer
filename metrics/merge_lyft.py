@@ -48,7 +48,13 @@ SUMMARY_LINE = re.compile(
 CONSISTENCY_LINE = re.compile(
     r"^n=(?P<n>\d+)\s+CBSR=(?P<cbsr>[0-9.]+).*?\bPD=(?P<pd>[0-9.]+)"
 )
-REPORT_KINDS = ("photometric", "HM", "consistency", "CRCS", "IPS")
+REPORT_KINDS = (
+    "photometric",
+    "HM",
+    # "consistency",  # CBSR and PD are paused and not part of measurement.
+    "CRCS",
+    "IPS",
+)
 
 
 def _metrics(text):
