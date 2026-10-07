@@ -162,6 +162,9 @@ def main():
             "Overall is the pixel-weighted mean of Left, Center, and Right, not Center_masked.",
             "Mean_LR is (Left+Right)/2 and Mean_LRC is (Left+Right+Center)/3 of those region means.",
             "Those two means use equal weight on the reported region scores. They are not pixel-weighted, and they exclude Center_masked.",
+            "Without histogram matching, Mean_LRC SSIM mixes Left/Right sparse SSIM with Center window SSIM.",
+            "With histogram matching, HM_SSIM is the per-pixel score after matching, including Center.",
+            "Mean_LRC HM_SSIM averages that value. Mean_LRC SSIM stays the mixed Center-window number.",
             "Histogram matching, when enabled, is done independently inside each region mask.",
         ])
     else:
@@ -178,20 +181,21 @@ def main():
     meta.append(f"Val-list scenes without a render directory: {len(missing_scenes)}.")
     meta.append(f"Scored frames: {scored} / {len(jobs)}.")
 
+    metric_names = PHOTOMETRIC_NAMES + ("hm_ssim",) if style == "sparse" else PHOTOMETRIC_NAMES
     handle = open_report(out_path, f"UniSplat wide {tag}", meta)
     with handle:
         handle.write("\n" + "=" * 80 + "\nSummary\n" + "=" * 80 + "\n")
-        write_bucket(handle, keys, global_buckets, PHOTOMETRIC_NAMES, fmt_photometric)
+        write_bucket(handle, keys, global_buckets, metric_names, fmt_photometric)
         if style == "sparse":
-            handle.write(format_equal_region_means(global_buckets, PHOTOMETRIC_NAMES, fmt_photometric))
+            handle.write(format_equal_region_means(global_buckets, metric_names, fmt_photometric))
         handle.write("\n" + "=" * 80 + "\nPer-scene\n" + "=" * 80 + "\n")
         for scene in sorted(scene_buckets):
             handle.write(f"\nScene {scene}:\n")
-            write_bucket(handle, keys, scene_buckets[scene], PHOTOMETRIC_NAMES, fmt_photometric, indent="  ")
+            write_bucket(handle, keys, scene_buckets[scene], metric_names, fmt_photometric, indent="  ")
             if style == "sparse":
                 handle.write(
                     format_equal_region_means(
-                        scene_buckets[scene], PHOTOMETRIC_NAMES, fmt_photometric, indent="  ",
+                        scene_buckets[scene], metric_names, fmt_photometric, indent="  ",
                     )
                 )
         if missing_scenes:

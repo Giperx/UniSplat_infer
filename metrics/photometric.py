@@ -119,6 +119,8 @@ def score_region(rendered, gt, mask, device, lpips_fn, ssim_kind, want_lpips, hi
     else:
         ssim_map = dense_ssim_map(work, gt, device)
         errors["ssim"] = float(ssim_map[mask].mean()) if mask.any() else 0.0
+    if histogram_match:
+        errors["hm_ssim"] = sparse_ssim(work, gt, mask)
     if want_lpips:
         lpips_map = resize_map(spatial_lpips(lpips_fn, work, gt, device), mask.shape)
         errors["lpips"] = float(lpips_map[mask].mean()) if mask.any() else float("nan")
