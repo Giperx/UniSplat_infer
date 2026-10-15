@@ -708,7 +708,7 @@ class GuassianHead(nn.Module):
 
                 tmp_history_poses = history_poses_homo[tmp_mask]
                 tmp_history_features = history_features[i][tmp_mask]
-                new_mask, _ = is_point_in_frustum_batch(tmp_history_poses, intrinsics[i], camera2lidar[i,:, :3,:3], camera2lidar[i,:, :3,3], 0.5, 72, 518, 350)
+                new_mask, _ = is_point_in_frustum_batch(tmp_history_poses, intrinsics[i], camera2lidar[i,:, :3,:3], camera2lidar[i,:, :3,3], 0.5, 72, W, H)
                 new_mask = new_mask.any(dim=-1)
                 inview_opacities = voxel_opacities[i][tmp_mask][new_mask]
                 inview_features = tmp_history_features[new_mask]

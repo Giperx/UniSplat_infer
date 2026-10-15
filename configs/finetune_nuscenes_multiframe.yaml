@@ -1,0 +1,67 @@
+# 3-frame fine-tune. Pi3 stays frozen; only gaussian_head is trained.
+# History frames rebuild Gaussians. Loss is the newest frame's cameras 5/4/3.
+#
+#   conda activate unisplat
+#   CUDA_VISIBLE_DEVICES=0 python scripts/finetune_multiframe.py \
+#       --config configs/finetune_nuscenes_multiframe.yaml
+# Multi-GPU, same config. batch_size stays per GPU:
+#   torchrun --nproc_per_node=2 scripts/finetune_multiframe_ddp.py \
+#       --config configs/finetune_nuscenes_multiframe.yaml
+
+Model:
+  pretrained: pretrained/model.safetensors
+  Gaussian_head:
+    Name: GuassianHead
+    Loss_weight:
+      rec_loss: 5.0
+      perceptual_loss: 0.05
+    sky_mask: 400.0
+    offset_scale: 2.0
+    max_scale: 0.1
+    max_scale_voxel: 0.2
+    l1_loss_mask: [1.875, 1.875, 1.875]
+    p_loss_mask: [0.6250, 0.6250, 0.6250]
+    pts_range: [-72.0, -72.0, -4.0, 72.0, 72.0, 12.0]
+    voxel_size: [0.1, 0.1, 0.2]
+    voxel_stream_quantile: 0.6
+    voxel_stream_quantile_outview: 0.6
+    voxel_stream_opacity_thre: -1
+    voxel_stream_inview_num: 300000
+    voxel_stream_outview_num: 400000
+    sky_gaussian_scale: 1.0
+    sky_gaussian_offset: 2.0
+    # Checkpoint canvas. Do not change this to the dataset height; nuScenes is resized to 518x294 at load time.
+    resolution: [518, 350]
+    voxel_gs_num: 2
+    neg_dyn_num: 50000
+    neg_dyn_ratio: 5
+    dyn_loss_weight: 0.05
+    aux_voxel_weight: 0.25
+
+Train:
+  work_dir: work_dirs/finetune_nuscenes_multiframe
+  max_steps: 10000
+  batch_size: 1
+  num_workers: 4
+  log_interval: 20
+  save_interval: 2000
+  preview_interval: 2000
+  forward_stage: 3
+  width_factor: 3.0
+  render_camera: 5
+  preview_samples:
+    - "002 002"
+    - "076 002"
+    - "078 013"
+
+Optimizer:
+  weight_decay: 0.01
+  head_lr: 5.0e-5
+  backbone_lr: 1.5e-5
+
+Dataset:
+  data_root: data/nuscenes/processed_10Hz/trainval2
+  scene_list: data/nuscenes/processed_10Hz/trainval2/nuScenes_Train.txt
+  cameras: "5,4,3"
+  num_frames: 3
+  train_long: 518
