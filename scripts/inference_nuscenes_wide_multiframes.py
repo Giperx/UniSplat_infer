@@ -45,6 +45,11 @@ def parse_args(argv=None, default_dataset="nuscenes"):
     parser.add_argument("--cameras", type=str, default=None)
     parser.add_argument("--render-camera", dest="render_camera", type=int, default=None)
     parser.add_argument("--width-factor", dest="width_factor", type=float, default=3.0)
+    parser.add_argument(
+        "--multiplane",
+        action="store_true",
+        help="Render three yawed main-camera planes and stitch left-center-right.",
+    )
     parser.add_argument("--car-mask-root", dest="car_mask_root", type=str, default=None)
     parser.add_argument("--mask-render-view", dest="mask_render_view", action="store_true")
     parser.add_argument("--disable-car-mask", dest="disable_car_mask", action="store_true")
@@ -245,16 +250,21 @@ def main(argv=None, default_dataset="nuscenes"):
                     history_dropped += dropped
 
                 if is_newest:
-                    wide_K, (wide_h, wide_w) = nw.make_wide_intrinsics(
-                        packed["Ks"][render_index], out_wh, args.width_factor
+                    view_K, view_c2w, fovx, fovy, panel_hw, (wide_h, wide_w) = nw.render_views(
+                        packed["Ks"][render_index],
+                        packed["c2ws"][render_index],
+                        out_wh,
+                        multiplane=args.multiplane,
+                        width_factor=args.width_factor,
                     )
-                    fovx, fovy = nw.intrinsics_to_fov(wide_K)
+                    panel_h, panel_w = panel_hw
+                    view_count = int(view_K.shape[0])
                     output_dict_gs = {
-                        "rgb": torch.zeros((1, 1, 3, wide_h, wide_w), dtype=torch.float32),
-                        "c2w": torch.from_numpy(packed["c2ws"][render_index]).float()[None, None],
-                        "fovx": torch.tensor([[fovx]], dtype=torch.float32),
-                        "fovy": torch.tensor([[fovy]], dtype=torch.float32),
-                        "intrinsics": torch.from_numpy(wide_K).float()[None, None],
+                        "rgb": torch.zeros((1, view_count, 3, panel_h, panel_w), dtype=torch.float32),
+                        "c2w": torch.from_numpy(view_c2w).float()[None],
+                        "fovx": torch.from_numpy(fovx).float()[None],
+                        "fovy": torch.from_numpy(fovy).float()[None],
+                        "intrinsics": torch.from_numpy(view_K).float()[None],
                     }
                 else:
                     fovx, fovy = _fovs(packed["Ks"])
@@ -297,7 +307,12 @@ def main(argv=None, default_dataset="nuscenes"):
                         )
                 if is_newest:
                     save_path = output_dir / scene / "rgb" / f"{frame}_{render_camera}_wide.jpg"
-                    save_rgb(render_pkg["image"][0], save_path)
+                    rendered = render_pkg["image"]
+                    if rendered.shape[0] == 1:
+                        rendered = rendered[0]
+                    else:
+                        rendered = torch.cat([rendered[view] for view in range(rendered.shape[0])], dim=-1)
+                    save_rgb(rendered, save_path)
                     saved = (out_h, out_w, wide_h, wide_w, save_path)
                     if args.save_inputs:
                         for view, cam in enumerate(cameras):
@@ -308,7 +323,8 @@ def main(argv=None, default_dataset="nuscenes"):
 
             print(
                 f"scene={scene} window={','.join(window)} render={newest} "
-                f"input={saved[0]}x{saved[1]} wide={saved[2]}x{saved[3]} "
+                f"input={saved[0]}x{saved[1]} "
+                f"{'multiplane' if args.multiplane else 'wide'}={saved[2]}x{saved[3]} "
                 f"dropped_current={current_dropped} dropped_history={history_dropped}",
                 flush=True,
             )

@@ -237,8 +237,11 @@ def _order_for(kind, metrics):
     return tuple(metrics)
 
 
-def write_combined(mode):
-    suffix = "wide" if mode == "single" else "wide_multiframes"
+def write_combined(mode, layout="wide"):
+    if layout == "multiplane":
+        suffix = "multiplane" if mode == "single" else "multiplane_multiframes"
+    else:
+        suffix = "wide" if mode == "single" else "wide_multiframes"
     dir_1920 = OUTPUTS / f"lyft1920_{suffix}"
     dir_1224 = OUTPUTS / f"lyft1224_{suffix}"
     sections = []
@@ -263,6 +266,7 @@ def write_combined(mode):
         "=== UniSplat Lyft combined (1920 + 1224) ===\n",
         f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n",
         f"Mode: {mode}\n",
+        f"Layout: {layout}\n",
         "1920 and 1224 are one dataset. Each value is the frame-count-weighted mean\n",
         "(value_1920 * n_1920 + value_1224 * n_1224) / (n_1920 + n_1224),\n",
         "not the average of the two subset means.\n",
@@ -290,6 +294,7 @@ def write_combined(mode):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("single", "multiframes", "both"), default="both")
+    parser.add_argument("--layout", choices=("wide", "multiplane"), default="wide")
     parser.add_argument(
         "--backfill-means",
         action="store_true",
@@ -303,7 +308,7 @@ def main():
             print(f"  {path.relative_to(REPO_ROOT)}")
     modes = ("single", "multiframes") if args.mode == "both" else (args.mode,)
     for mode in modes:
-        write_combined(mode)
+        write_combined(mode, layout=args.layout)
 
 
 if __name__ == "__main__":

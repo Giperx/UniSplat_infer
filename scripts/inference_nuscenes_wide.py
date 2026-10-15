@@ -16,6 +16,10 @@ Output layout (matching DepthSplat)::
 
     <output-dir>/<scene>/rgb/{frame}_{render_cam}_wide.jpg   # quality 95
 
+``--multiplane`` renders three pinhole planes from the main-camera pose,
+yawed by one horizontal field of view, and stitches them left-center-right.
+That matches ``sparseMultiplaneImages3``. The default remains one 3x-wide pinhole.
+
 with optional ``<output-dir>/<scene>/inputs/{frame}_{cam}.jpg``.
 """
 
@@ -47,6 +51,11 @@ def parse_args(argv=None, default_dataset="nuscenes"):
     parser.add_argument("--cameras", type=str, default=None, help="Comma separated context camera ids (order preserved).")
     parser.add_argument("--render-camera", dest="render_camera", type=int, default=None)
     parser.add_argument("--width-factor", dest="width_factor", type=float, default=3.0)
+    parser.add_argument(
+        "--multiplane",
+        action="store_true",
+        help="Render three yawed main-camera planes and stitch left-center-right.",
+    )
     parser.add_argument("--car-mask-root", dest="car_mask_root", type=str, default=None)
     parser.add_argument("--mask-render-view", dest="mask_render_view", action="store_true")
     parser.add_argument("--disable-car-mask", dest="disable_car_mask", action="store_true")
@@ -75,6 +84,30 @@ def _preload_torch_libs(torch) -> None:
 def resolve_local(path) -> Path:
     path = Path(path).expanduser()
     return path if path.is_absolute() else (REPO_ROOT / path)
+
+
+def build_output_dict(torch, K, c2w, out_wh, multiplane, width_factor):
+    """Raster targets. Multiplane stitches three panels; wide is one 3x pinhole."""
+    view_K, view_c2w, fovx, fovy, panel_hw, stitched_hw = nw.render_views(
+        K, c2w, out_wh, multiplane=multiplane, width_factor=width_factor
+    )
+    panel_h, panel_w = panel_hw
+    view_count = int(view_K.shape[0])
+    output_dict_gs = {
+        "rgb": torch.zeros((1, view_count, 3, panel_h, panel_w), dtype=torch.float32),
+        "c2w": torch.from_numpy(view_c2w).float()[None],
+        "fovx": torch.from_numpy(fovx).float()[None],
+        "fovy": torch.from_numpy(fovy).float()[None],
+        "intrinsics": torch.from_numpy(view_K).float()[None],
+    }
+    return output_dict_gs, stitched_hw
+
+
+def stitch_render(torch, image):
+    """``[V,3,H,W]`` left-to-right. A single view is returned unchanged."""
+    if image.shape[0] == 1:
+        return image[0]
+    return torch.cat([image[view] for view in range(image.shape[0])], dim=-1)
 
 
 def save_rgb(tensor_chw, path: Path) -> None:
@@ -231,18 +264,15 @@ def main(argv=None, default_dataset="nuscenes"):
             source_keep_mask = torch.from_numpy(keep_np)
             dropped = int((~keep_np).sum())
 
-            # --- wide render target ---------------------------------------
-            wide_K, (wide_h, wide_w) = nw.make_wide_intrinsics(
-                Ks[render_index], out_wh, args.width_factor
+            # --- wide or multiplane render target -----------------------
+            output_dict_gs, (wide_h, wide_w) = build_output_dict(
+                torch,
+                Ks[render_index],
+                c2ws[render_index],
+                out_wh,
+                args.multiplane,
+                args.width_factor,
             )
-            fovx, fovy = nw.intrinsics_to_fov(wide_K)
-            output_dict_gs = {
-                "rgb": torch.zeros((1, 1, 3, wide_h, wide_w), dtype=torch.float32),
-                "c2w": torch.from_numpy(c2ws[render_index]).float()[None, None],
-                "fovx": torch.tensor([[fovx]], dtype=torch.float32),
-                "fovy": torch.tensor([[fovy]], dtype=torch.float32),
-                "intrinsics": torch.from_numpy(wide_K).float()[None, None],
-            }
 
             # --- to device ------------------------------------------------
             images = images.to(device)
@@ -274,7 +304,7 @@ def main(argv=None, default_dataset="nuscenes"):
 
             # --- save -----------------------------------------------------
             save_rgb(
-                render_pkg["image"][0],
+                stitch_render(torch, render_pkg["image"]),
                 output_dir / scene / "rgb" / f"{frame}_{render_camera}_wide.jpg",
             )
             if args.save_inputs:
@@ -286,7 +316,7 @@ def main(argv=None, default_dataset="nuscenes"):
 
             print(
                 f"scene={scene} frame={frame} input={out_h}x{out_w} "
-                f"wide={wide_h}x{wide_w} dropped={dropped}",
+                f"{'multiplane' if args.multiplane else 'wide'}={wide_h}x{wide_w} dropped={dropped}",
                 flush=True,
             )
             if args.mask_kind != "none" and not args.disable_car_mask and dropped == 0:

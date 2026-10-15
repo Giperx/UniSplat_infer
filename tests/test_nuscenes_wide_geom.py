@@ -153,6 +153,51 @@ def test_dataset_mask_paths():
         raise AssertionError("WideDrive must not resolve an ego-car mask path")
 
 
+def test_multiplane_yaw_matches_sparse_gt():
+    K = geom.intrinsics_from_params(100.0, 80.0, 40.0, 30.0)
+    c2w = np.eye(4)
+    c2w[:3, 3] = (1.0, 2.0, 3.0)
+    width = 100
+    poses = geom.make_multiplane_poses(c2w, K, width)
+    alpha = np.arctan(40.0 / 100.0) + np.arctan((width - 40.0) / 100.0)
+    cosine, sine = np.cos(alpha), np.sin(alpha)
+    rotate_left = np.array([[cosine, 0.0, -sine], [0.0, 1.0, 0.0], [sine, 0.0, cosine]])
+    rotate_right = np.array([[cosine, 0.0, sine], [0.0, 1.0, 0.0], [-sine, 0.0, cosine]])
+    assert poses.shape == (3, 4, 4)
+    assert np.allclose(poses[1], c2w)
+    assert np.allclose(poses[0, :3, :3], rotate_left)
+    assert np.allclose(poses[2, :3, :3], rotate_right)
+    assert np.allclose(poses[:, :3, 3], (1.0, 2.0, 3.0))
+
+    view_K, view_c2w, fovx, fovy, panel_hw, stitched_hw = geom.render_views(
+        K, c2w, (width, 60), multiplane=True
+    )
+    assert view_K.shape == (3, 3, 3)
+    assert view_c2w.shape == (3, 4, 4)
+    assert fovx.shape == (3,) and fovy.shape == (3,)
+    assert panel_hw == (60, 100)
+    assert stitched_hw == (60, 300)
+    assert np.allclose(view_K[0], K)
+
+
+def test_fill_preset_multiplane_output_dir():
+    class Args:
+        pass
+
+    args = Args()
+    args.dataset = "nuscenes"
+    args.data_root = "data/missing"
+    args.scene_list = "data/missing/list.txt"
+    args.cameras = "5,4,3"
+    args.render_camera = 5
+    args.car_mask_root = "data/missing/masks"
+    args.output_dir = None
+    args.disable_car_mask = False
+    args.multiplane = True
+    geom.fill_preset_args(args, multi=True)
+    assert args.output_dir == "outputs/nuscenes_multiplane_multiframes"
+
+
 def test_fill_preset_widedrive_disables_mask():
     class Args:
         pass

@@ -280,7 +280,10 @@ def fill_preset_args(args, multi: bool = False):
         else:
             args.car_mask_root = preset.mask_root
     if not getattr(args, "output_dir", None):
-        suffix = "_wide_multiframes" if multi else "_wide"
+        if getattr(args, "multiplane", False):
+            suffix = "_multiplane_multiframes" if multi else "_multiplane"
+        else:
+            suffix = "_wide_multiframes" if multi else "_wide"
         args.output_dir = f"outputs/{preset.name}{suffix}"
     args.mask_kind = preset.mask_kind
     args.mask_ext = preset.mask_ext or "png"
@@ -416,6 +419,88 @@ def make_wide_intrinsics(
     K_wide[0, 2] = wide_w / 2.0
     K_wide[2] = (0.0, 0.0, 1.0)
     return K_wide, (wide_h, wide_w)
+
+
+def make_multiplane_poses(c2w: np.ndarray, K: np.ndarray, width: int) -> np.ndarray:
+    """Yaw the main camera into left, center, and right planes.
+
+    This is the raw multiplane used by ``sparseMultiplaneImages3``, not the
+    single 3x-wide pinhole. ``alpha`` is the full horizontal field of view.
+    Left is ``R @ Ry`` with the negative-yaw matrix from
+    ``build_multiplane_simple_raw``; right uses the positive-yaw matrix.
+    The camera center is unchanged. Return shape is ``[3, 4, 4]`` in save
+    order left, center, right.
+    """
+    c2w = np.asarray(c2w, dtype=np.float64).copy()
+    K = np.asarray(K, dtype=np.float64)
+    if c2w.shape != (4, 4):
+        raise ValueError(f"c2w must be 4x4, got shape {c2w.shape}.")
+    if K.shape != (3, 3):
+        raise ValueError(f"K must be 3x3, got shape {K.shape}.")
+    width = float(width)
+    if width <= 0:
+        raise ValueError(f"width must be positive, got {width}.")
+    fx = float(K[0, 0])
+    cx = float(K[0, 2])
+    if fx == 0.0:
+        raise ValueError("fx must be non-zero to yaw a multiplane camera.")
+    alpha = math.atan(cx / fx) + math.atan((width - cx) / fx)
+    cosine, sine = math.cos(alpha), math.sin(alpha)
+    rotate_left = np.array(
+        [[cosine, 0.0, -sine], [0.0, 1.0, 0.0], [sine, 0.0, cosine]],
+        dtype=np.float64,
+    )
+    rotate_right = np.array(
+        [[cosine, 0.0, sine], [0.0, 1.0, 0.0], [-sine, 0.0, cosine]],
+        dtype=np.float64,
+    )
+    rotation = c2w[:3, :3]
+    left = c2w.copy()
+    right = c2w.copy()
+    left[:3, :3] = rotation @ rotate_left
+    right[:3, :3] = rotation @ rotate_right
+    return np.stack([left, c2w, right], axis=0)
+
+
+def render_views(
+    K: np.ndarray,
+    c2w: np.ndarray,
+    out_wh: Sequence[int],
+    multiplane: bool = False,
+    width_factor: float = DEFAULT_WIDTH_FACTOR,
+):
+    """Cameras to rasterize, then the stitched image size.
+
+    Wide mode is one pinhole whose width is ``width_factor`` times the input.
+    Multiplane mode is three copies of the input camera, yawed left and right,
+    stitched left-center-right. Returns ``(Ks[V,3,3], c2ws[V,4,4], fovx[V],
+    fovy[V], panel_hw, stitched_hw)`` with ``hw`` as ``(height, width)``.
+    """
+    out_w, out_h = int(out_wh[0]), int(out_wh[1])
+    if multiplane:
+        poses = make_multiplane_poses(c2w, K, out_w)
+        Ks = np.repeat(np.asarray(K, dtype=np.float64)[None], 3, axis=0)
+        fovx, fovy = intrinsics_to_fov(K)
+        panel_hw = (out_h, out_w)
+        stitched_hw = (out_h, out_w * 3)
+        return (
+            Ks,
+            poses,
+            np.array([fovx, fovx, fovx], dtype=np.float64),
+            np.array([fovy, fovy, fovy], dtype=np.float64),
+            panel_hw,
+            stitched_hw,
+        )
+    wide_K, panel_hw = make_wide_intrinsics(K, out_wh, width_factor)
+    fovx, fovy = intrinsics_to_fov(wide_K)
+    return (
+        wide_K[None],
+        np.asarray(c2w, dtype=np.float64)[None],
+        np.array([fovx], dtype=np.float64),
+        np.array([fovy], dtype=np.float64),
+        panel_hw,
+        panel_hw,
+    )
 
 
 def intrinsics_to_fov(K: np.ndarray) -> Tuple[float, float]:
